@@ -207,7 +207,8 @@ app.get("/api/notion-token/status", async (c) => {
   return c.json({ configured: !!row });
 });
 
-// 管理者Macのローカルスクリプトが、自分のINGEST_API_KEYを使って実際のトークン値を取りに来る用
+// 管理者Macのローカルスクリプトが、自分のINGEST_API_KEYを使って実際のトークン値を取りに来る用。
+// ?employee=<slug> を付けると、その社員に個別のNotion書き込み先が設定されていればそちらを優先して返す。
 app.get("/api/notion-token", async (c) => {
   const auth = c.req.header("Authorization");
   const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
@@ -216,10 +217,23 @@ app.get("/api/notion-token", async (c) => {
     .bind(bearer)
     .first<{ org_id: string }>();
   if (!secretRow) return c.json({ error: "認証に失敗しました" }, 401);
+
+  const employeeSlug = c.req.query("employee");
+  if (employeeSlug) {
+    const emp = await c.env.DB.prepare(
+      "SELECT notion_token, notion_report_db_url FROM employees WHERE org_id = ? AND slug = ?"
+    )
+      .bind(secretRow.org_id, employeeSlug)
+      .first<{ notion_token: string | null; notion_report_db_url: string | null }>();
+    if (emp?.notion_token) {
+      return c.json({ token: emp.notion_token, report_db_url: emp.notion_report_db_url ?? null });
+    }
+  }
+
   const tokenRow = await c.env.DB.prepare("SELECT value FROM secrets WHERE org_id = ? AND key = 'notion_token'")
     .bind(secretRow.org_id)
     .first<{ value: string }>();
-  return c.json({ token: tokenRow?.value ?? null });
+  return c.json({ token: tokenRow?.value ?? null, report_db_url: null });
 });
 
 app.post("/api/activity/ingest", async (c) => {
@@ -391,7 +405,9 @@ app.delete("/api/managers/:id", async (c) => {
 
 app.get("/api/employees", async (c) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT id, name, slug, note, status, drive_path, notion_page_url, monitoring_enabled, added_at FROM employees WHERE org_id = ? ORDER BY added_at DESC"
+    `SELECT id, name, slug, note, status, drive_path, notion_page_url, monitoring_enabled, added_at,
+            notion_report_db_url, (notion_token IS NOT NULL) as has_notion_override
+     FROM employees WHERE org_id = ? ORDER BY added_at DESC`
   )
     .bind(c.get("orgId"))
     .all();
@@ -455,8 +471,17 @@ app.post("/api/employees", async (c) => {
 });
 
 app.patch("/api/employees/:id", async (c) => {
-  const body = await c.req.json<{ name?: string; note?: string; drive_path?: string; notion_page_url?: string }>();
-  const fields = (["name", "note", "drive_path", "notion_page_url"] as const).filter((k) => k in body);
+  const body = await c.req.json<{
+    name?: string;
+    note?: string;
+    drive_path?: string;
+    notion_page_url?: string;
+    notion_token?: string;
+    notion_report_db_url?: string;
+  }>();
+  const fields = (
+    ["name", "note", "drive_path", "notion_page_url", "notion_token", "notion_report_db_url"] as const
+  ).filter((k) => k in body);
   if (!fields.length) return c.json({ error: "更新する項目がありません" }, 400);
   const setClause = fields.map((f) => `${f} = ?`).join(", ");
   await c.env.DB.prepare(`UPDATE employees SET ${setClause} WHERE id = ? AND org_id = ?`)

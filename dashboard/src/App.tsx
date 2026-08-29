@@ -15,6 +15,8 @@ type Employee = {
   status: "pending" | "active";
   drive_path: string | null;
   notion_page_url: string | null;
+  notion_report_db_url: string | null;
+  has_notion_override: number;
   monitoring_enabled: number;
   added_at: string;
 };
@@ -468,10 +470,28 @@ function EmployeesSection({
     load();
   };
 
-  const editField = async (emp: Employee, field: "drive_path" | "notion_page_url", label: string) => {
+  const editField = async (
+    emp: Employee,
+    field: "drive_path" | "notion_page_url" | "notion_report_db_url",
+    label: string
+  ) => {
     const value = prompt(`${emp.name} の${label}`, emp[field] ?? "");
     if (value === null) return;
     await api(`/api/employees/${emp.id}`, { method: "PATCH", body: JSON.stringify({ [field]: value }) });
+    load();
+  };
+
+  // Notionトークンは秘密情報なので、現在値を画面に出さず常に空欄から入力させる
+  const editNotionTokenOverride = async (emp: Employee) => {
+    const value = prompt(
+      `${emp.name} 専用のNotion連携トークン(組織共通ではなく、この人だけ別のNotionアカウントに書き込みたい場合に設定)`,
+      ""
+    );
+    if (value === null || !value.trim()) return;
+    await api(`/api/employees/${emp.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ notion_token: value.trim() }),
+    });
     load();
   };
 
@@ -536,6 +556,7 @@ function EmployeesSection({
               <th>監視</th>
               <th>格納先パス</th>
               <th>Notionページ</th>
+              <th>Notion書き込み先(個別)</th>
               <th>セットアップコマンド</th>
               <th></th>
             </tr>
@@ -573,6 +594,22 @@ function EmployeesSection({
                     {emp.notion_page_url ? "編集" : "登録"}
                   </button>
                 </td>
+                <td className="truncate-cell" title={emp.notion_report_db_url ?? ""}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", alignItems: "flex-start" }}>
+                    <span className={`status-badge ${emp.has_notion_override ? "active" : "pending"}`}>
+                      {emp.has_notion_override ? "個別設定あり" : "組織共通"}
+                    </span>
+                    <button className="ghost small" onClick={() => editNotionTokenOverride(emp)}>
+                      トークン登録
+                    </button>
+                    <button
+                      className="ghost small"
+                      onClick={() => editField(emp, "notion_report_db_url", "個別のNotion書き込み先データベースURL")}
+                    >
+                      {emp.notion_report_db_url ? "書き込み先DB編集" : "書き込み先DB登録"}
+                    </button>
+                  </div>
+                </td>
                 <td>
                   <button className="ghost small" onClick={() => copyCommand(emp.slug)}>
                     コマンドをコピー
@@ -587,7 +624,7 @@ function EmployeesSection({
             ))}
             {employees.length === 0 && (
               <tr>
-                <td colSpan={8} className="empty">
+                <td colSpan={9} className="empty">
                   まだ社員が登録されていません
                 </td>
               </tr>

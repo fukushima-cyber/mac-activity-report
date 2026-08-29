@@ -10,14 +10,14 @@ const NOTION_REPORT_DB_URL = process.env.NOTION_REPORT_DB_URL;
 const DATE = process.argv[2];
 const INPUT_FILE = process.argv[3];
 
-async function fetchNotionToken() {
-  if (!INGEST_API_KEY) return null;
-  const res = await fetch(`${DASHBOARD_URL}/api/notion-token`, {
-    headers: { Authorization: `Bearer ${INGEST_API_KEY}` },
-  });
-  if (!res.ok) return null;
+async function fetchNotionToken(employeeSlug) {
+  if (!INGEST_API_KEY) return { token: null, reportDbUrl: null };
+  const url = new URL(`${DASHBOARD_URL}/api/notion-token`);
+  if (employeeSlug) url.searchParams.set("employee", employeeSlug);
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` } });
+  if (!res.ok) return { token: null, reportDbUrl: null };
   const json = await res.json();
-  return json.token ?? null;
+  return { token: json.token ?? null, reportDbUrl: json.report_db_url ?? null };
 }
 
 async function main() {
@@ -36,11 +36,6 @@ async function main() {
   if (!Array.isArray(reports) || reports.length === 0) {
     console.log("対象レポートなし");
     return;
-  }
-
-  const notionToken = await fetchNotionToken();
-  if (!notionToken) {
-    console.log("Notionトークンが未設定のため、Notionへの書き込みはスキップします(ダッシュボードの「設定」から登録できます)。");
   }
 
   for (const r of reports) {
@@ -64,11 +59,17 @@ async function main() {
       console.log(`ダッシュボードへ送信(${r.employee_name}): ${res.ok ? "成功" : "失敗 " + res.status}`);
     }
 
-    // Notionへ
-    if (notionToken && NOTION_REPORT_DB_URL) {
+    // Notionへ(社員ごとの個別設定があればそちらを優先、無ければ組織共通)
+    const { token: notionToken, reportDbUrl: employeeReportDbUrl } = await fetchNotionToken(r.employee_slug);
+    const reportDbUrl = employeeReportDbUrl ?? NOTION_REPORT_DB_URL;
+    if (!notionToken) {
+      console.log(`Notionトークンが未設定のため、Notionへの書き込みはスキップします(${r.employee_name})。`);
+    } else if (!reportDbUrl) {
+      console.log(`Notionの書き込み先DBが未設定のため、スキップします(${r.employee_name})。`);
+    } else {
       try {
         const children = timelineToBlocks(r.timeline ?? [], r.day_note);
-        await upsertReportPage(notionToken, NOTION_REPORT_DB_URL, {
+        await upsertReportPage(notionToken, reportDbUrl, {
           titleValue: `${DATE}_${r.employee_slug}`,
           properties: {
             date: DATE,

@@ -109,7 +109,6 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
 type Settings = {
   shared_drive_path?: string;
   notion_report_db_url?: string;
-  notion_apps_db_url?: string;
 };
 
 function SettingsSection() {
@@ -181,20 +180,12 @@ function SettingsSection() {
             onChange={(e) => setSettings({ ...settings, notion_report_db_url: e.target.value })}
           />
         </label>
-        <label>
-          Notion「アプリ別集計」データベースのURL
-          <input
-            placeholder="https://app.notion.com/p/..."
-            value={settings.notion_apps_db_url ?? ""}
-            onChange={(e) => setSettings({ ...settings, notion_apps_db_url: e.target.value })}
-          />
-        </label>
         <button type="submit">保存</button>
         {saved && <span className="saved-badge">保存しました</span>}
       </form>
       {error && <p className="error">{error}</p>}
       <p className="hint">
-        共有ドライブのパスは、社員のセットアップコマンドが自動で読み込みます(セットアップ時に手入力する必要がなくなります)。NotionのURLは、日次レポート生成スクリプトがどのデータベースに書き込むかの参照先です。1人1日=1ページで、ページを開くと時間帯ごとのタイムラインが載ります。
+        共有ドライブのパスは、社員のセットアップコマンドが自動で読み込みます(セットアップ時に手入力する必要がなくなります)。NotionのURLは、日次レポート生成スクリプトがどのデータベースに書き込むかの参照先です。1人1日=1ページで、ページを開くと時間帯ごとのタイムラインとアプリ別内訳が載ります。
       </p>
 
       <hr className="divider" />

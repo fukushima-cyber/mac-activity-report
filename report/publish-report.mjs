@@ -1,14 +1,29 @@
 // AIが出した分析JSON(標準入力 or 引数のファイル)を受け取り、
 // Notion(組織ごとのトークンでREST API直叩き)とダッシュボードへ書き込む。決定的処理・AI不使用。
 import fs from "node:fs/promises";
+import path from "node:path";
 import { upsertReportPage, timelineToBlocks } from "./notion-api.mjs";
+import { computeAppTotals } from "./aggregate-apps.mjs";
 
 const DASHBOARD_URL = process.env.DASHBOARD_URL ?? "https://log.bonkers.llc";
 const ORG_ID = process.env.ORG_ID;
 const INGEST_API_KEY = process.env.INGEST_API_KEY;
 const NOTION_REPORT_DB_URL = process.env.NOTION_REPORT_DB_URL;
+const SHARED_DRIVE_PATH = process.env.SHARED_DRIVE_PATH;
 const DATE = process.argv[2];
 const INPUT_FILE = process.argv[3];
+
+async function readAppTotals(employeeSlug) {
+  if (!SHARED_DRIVE_PATH) return [];
+  try {
+    const raw = JSON.parse(
+      await fs.readFile(path.join(SHARED_DRIVE_PATH, `${DATE}_${employeeSlug}.json`), "utf-8")
+    );
+    return computeAppTotals(raw.windows);
+  } catch {
+    return [];
+  }
+}
 
 async function fetchNotionToken(employeeSlug) {
   if (!INGEST_API_KEY) return { token: null, reportDbUrl: null };
@@ -68,7 +83,8 @@ async function main() {
       console.log(`Notionの書き込み先DBが未設定のため、スキップします(${r.employee_name})。`);
     } else {
       try {
-        const children = timelineToBlocks(r.timeline ?? [], r.day_note);
+        const appTotals = await readAppTotals(r.employee_slug);
+        const children = timelineToBlocks(r.timeline ?? [], r.day_note, appTotals);
         await upsertReportPage(notionToken, reportDbUrl, {
           titleValue: `${DATE}_${r.employee_slug}`,
           properties: {

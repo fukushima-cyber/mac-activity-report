@@ -1,4 +1,4 @@
-// 他社・他の人が、自分のNotionワークスペースに「社員稼働レポート」「アプリ別集計」を
+// 他社・他の人が、自分のNotionワークスペースに「社員稼働レポート」を
 // 自動で作るための初回セットアップスクリプト。AI不使用。
 //
 // 使い方:
@@ -28,21 +28,9 @@ async function main() {
   });
   console.log("「社員稼働レポート」を作成しました:");
   console.log(`  ${reportDb.url}`);
-
-  const appsDb = await createDatabase(token, parentPageUrl, "アプリ別集計", {
-    行タイトル: { title: {} },
-    日付: { date: {} },
-    社員: { rich_text: {} },
-    アプリ: { rich_text: {} },
-    秒数: { number: {} },
-  });
-  console.log("「アプリ別集計」を作成しました:");
-  console.log(`  ${appsDb.url}`);
-
   console.log("");
-  console.log("次の手順:");
-  console.log("1. ダッシュボード(https://log.bonkers.llc)の「設定」で、上の2つのURLとNotionトークンを保存してください");
-  console.log("2. Notion側で「アプリ別集計」を開き、お好みで「アプリ別」「社員別」のチャートビューを手動で追加すると見やすくなります(自動作成はできません)");
+  console.log("次の手順: ダッシュボード(https://log.bonkers.llc)の「設定」で、上のURLとNotionトークンを保存してください");
+  console.log("(社員ごとに個別設定したい場合は、「社員」画面のその人の行から登録できます)");
 }
 
 main().catch((err) => {

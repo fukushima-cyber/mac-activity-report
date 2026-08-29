@@ -81,7 +81,11 @@ export async function upsertReportPage(token, databaseId, { titleValue, properti
   return created.id;
 }
 
-export function timelineToBlocks(timeline, summaryText) {
+function formatHours(seconds) {
+  return (seconds / 3600).toFixed(1) + "h";
+}
+
+export function timelineToBlocks(timeline, summaryText, appTotals) {
   const tableRows = [
     {
       type: "table_row",
@@ -107,6 +111,27 @@ export function timelineToBlocks(timeline, summaryText) {
   if (summaryText) {
     blocks.push({ type: "paragraph", paragraph: { rich_text: rt(summaryText) } });
   }
+
+  if (appTotals && appTotals.length > 0) {
+    const sorted = [...appTotals].sort((a, b) => b.seconds - a.seconds);
+    blocks.push({ type: "heading_2", heading_2: { rich_text: rt("アプリ別内訳") } });
+    blocks.push({
+      type: "table",
+      table: {
+        table_width: 2,
+        has_column_header: true,
+        has_row_header: false,
+        children: [
+          { type: "table_row", table_row: { cells: [rt("アプリ"), rt("稼働時間")] } },
+          ...sorted.map((a) => ({
+            type: "table_row",
+            table_row: { cells: [rt(a.app), rt(formatHours(a.seconds))] },
+          })),
+        ],
+      },
+    });
+  }
+
   return blocks;
 }
 
@@ -122,22 +147,3 @@ export async function createDatabase(token, parentPageId, title, properties) {
   return created;
 }
 
-export async function upsertAppRow(token, databaseId, { titleValue, date, employeeName, app, seconds }) {
-  const existingId = await findPageByTitle(token, databaseId, "行タイトル", titleValue);
-  const properties = {
-    行タイトル: { title: rt(titleValue) },
-    日付: { date: { start: date } },
-    社員: { rich_text: rt(employeeName) },
-    アプリ: { rich_text: rt(app) },
-    秒数: { number: seconds },
-  };
-  if (existingId) {
-    await notionFetch(token, `/pages/${existingId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
-    return existingId;
-  }
-  const created = await notionFetch(token, "/pages", {
-    method: "POST",
-    body: JSON.stringify({ parent: { database_id: toDashedId(databaseId) }, properties }),
-  });
-  return created.id;
-}

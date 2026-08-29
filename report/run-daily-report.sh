@@ -31,7 +31,6 @@ setting() {
 export SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$(setting shared_drive_path)}"
 export SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$PROJECT_DIR/data}"
 export NOTION_REPORT_DB_URL="${NOTION_REPORT_DB_URL:-$(setting notion_report_db_url)}"
-export NOTION_APPS_DB_URL="${NOTION_APPS_DB_URL:-$(setting notion_apps_db_url)}"
 
 PROMPT=$(sed \
   -e "s|{{DATE}}|$DATE|g" \
@@ -59,5 +58,5 @@ node "$SCRIPT_DIR/publish-report.mjs" "$DATE" "$ANALYSIS_FILE"
 rm -f "$ANALYSIS_FILE"
 
 echo ""
-echo "=== 集計データ(アプリ別の稼働時間)をNotion・ダッシュボードへ送信 ==="
+echo "=== 集計データ(アプリ別の稼働時間)をダッシュボードへ送信 ==="
 node "$SCRIPT_DIR/ingest-activity.mjs" "$DATE"

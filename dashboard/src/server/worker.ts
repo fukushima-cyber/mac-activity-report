@@ -148,7 +148,7 @@ app.get("/api/me", async (c) => {
 
 // --- 設定(共有ドライブのパス・Notionページ) ---
 
-const SETTINGS_KEYS = ["shared_drive_path", "notion_report_db_url", "notion_apps_db_url"] as const;
+const SETTINGS_KEYS = ["shared_drive_path", "notion_report_db_url"] as const;
 
 app.get("/api/settings", async (c) => {
   // 未ログインでも読める公開エンドポイント(社員のセットアップスクリプト用)なので、org指定が必須

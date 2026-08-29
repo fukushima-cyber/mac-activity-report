@@ -1,22 +1,13 @@
-// アプリ別の稼働秒数を集計し、ダッシュボード(Cloudflare)へ送る。AI不使用・決定的な集計のみ。
+// アプリ別の稼働秒数を集計し、ダッシュボード(Cloudflare、「集計」タブ用)へ送る。
+// AI不使用・決定的な集計のみ。Notionへの書き込みは publish-report.mjs 側で
+// 「社員稼働レポート」ページ内の「アプリ別内訳」としてまとめて行う(こちらはダッシュボード専用)。
 // 使い方: node report/ingest-activity.mjs [YYYY-MM-DD]
 import fs from "node:fs/promises";
 import path from "node:path";
-import { upsertAppRow } from "./notion-api.mjs";
+import { computeAppTotals } from "./aggregate-apps.mjs";
 
 const DASHBOARD_URL = process.env.DASHBOARD_URL ?? "https://log.bonkers.llc";
 const INGEST_API_KEY = process.env.INGEST_API_KEY;
-const NOTION_APPS_DB_URL = process.env.NOTION_APPS_DB_URL;
-
-async function fetchNotionToken() {
-  if (!INGEST_API_KEY) return null;
-  const res = await fetch(`${DASHBOARD_URL}/api/notion-token`, {
-    headers: { Authorization: `Bearer ${INGEST_API_KEY}` },
-  });
-  if (!res.ok) return null;
-  const json = await res.json();
-  return json.token ?? null;
-}
 
 function jstYesterday() {
   const now = new Date();
@@ -55,16 +46,9 @@ async function main() {
     return;
   }
 
-  const notionToken = await fetchNotionToken();
-
   for (const file of files) {
     const raw = JSON.parse(await fs.readFile(path.join(sharedDrivePath, file), "utf-8"));
-    const totals = new Map();
-    for (const w of raw.windows ?? []) {
-      const app = w.app || "(不明)";
-      totals.set(app, (totals.get(app) ?? 0) + Math.round(w.duration_seconds ?? 0));
-    }
-    const apps = Array.from(totals, ([app, seconds]) => ({ app, seconds }));
+    const apps = computeAppTotals(raw.windows);
 
     const res = await fetch(`${DASHBOARD_URL}/api/activity/ingest`, {
       method: "POST",
@@ -75,23 +59,6 @@ async function main() {
       console.error(`送信失敗(${raw.employee}): ${res.status} ${await res.text()}`);
     } else {
       console.log(`送信完了: ${raw.employee} ${raw.date} (${apps.length}アプリ)`);
-    }
-
-    if (notionToken && NOTION_APPS_DB_URL) {
-      for (const { app, seconds } of apps) {
-        try {
-          await upsertAppRow(notionToken, NOTION_APPS_DB_URL, {
-            titleValue: `${raw.date}_${raw.employee}_${app}`,
-            date: raw.date,
-            employeeName: raw.employee,
-            app,
-            seconds,
-          });
-        } catch (err) {
-          console.error(`Notion「アプリ別集計」書き込み失敗(${raw.employee}/${app}):`, err.message);
-        }
-      }
-      console.log(`Notion「アプリ別集計」へ書き込み完了: ${raw.employee}`);
     }
   }
 }

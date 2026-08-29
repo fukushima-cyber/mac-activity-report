@@ -1,0 +1,22 @@
+{
+  "name": "kado",
+  "main": "src/server/worker.ts",
+  "routes": [
+    { "pattern": "log.bonkers.llc", "custom_domain": true }
+  ],
+  "compatibility_date": "2026-08-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mac-activity-dashboard-db",
+      "database_id": "56fecbb5-6bd1-4431-afb3-873f2b1d0f1a",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

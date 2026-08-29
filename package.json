@@ -1,0 +1,14 @@
+{
+  "name": "mac-activity-report",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "export": "tsx agent/export-daily-log.ts",
+    "report": "tsx report/generate-report.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

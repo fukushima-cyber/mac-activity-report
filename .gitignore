@@ -1,0 +1,14 @@
+node_modules/
+data/
+*.log
+
+# 秘密情報・組織固有の設定(社員ごとに別々に持つもの)
+agent/.env
+report/.env
+
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.wrangler/
+dashboard/.oxlintrc.json.bak
+
+.DS_Store

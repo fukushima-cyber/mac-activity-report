@@ -489,8 +489,17 @@ function EmployeesSection({
   const setupCommand = (slug: string) =>
     `cd mac-activity-report && EMPLOYEE_NAME=${slug} ORG_ID=${orgId} ./agent/setup-employee-mac.sh`;
 
+  const setupCommandWindows = (slug: string) =>
+    `cd mac-activity-report; $env:EMPLOYEE_NAME="${slug}"; $env:ORG_ID="${orgId}"; .\\agent\\setup-employee-windows.ps1`;
+
   const copyCommand = async (slug: string) => {
     await navigator.clipboard.writeText(setupCommand(slug));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const copyCommandWindows = async (slug: string) => {
+    await navigator.clipboard.writeText(setupCommandWindows(slug));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -500,11 +509,17 @@ function EmployeesSection({
       {justAdded && (
         <div className="callout">
           <p>
-            <strong>{justAdded.name}</strong> を追加しました。本人のMacで、下のコマンドを1回実行してもらってください。
+            <strong>{justAdded.name}</strong> を追加しました。本人のPCで、下のコマンドを1回実行してもらってください(Mac/Windowsどちらか本人の環境に合う方)。
           </p>
           <div className="command-row">
             <code>{setupCommand(justAdded.slug)}</code>
-            <button onClick={() => copyCommand(justAdded.slug)}>{copied ? "コピー済み" : "コピー"}</button>
+            <button onClick={() => copyCommand(justAdded.slug)}>{copied ? "コピー済み" : "Macコマンドをコピー"}</button>
+          </div>
+          <div className="command-row">
+            <code>{setupCommandWindows(justAdded.slug)}</code>
+            <button onClick={() => copyCommandWindows(justAdded.slug)}>
+              {copied ? "コピー済み" : "Windowsコマンドをコピー"}
+            </button>
           </div>
           <button className="ghost" onClick={() => setJustAdded(null)}>
             閉じる
@@ -602,9 +617,14 @@ function EmployeesSection({
                   </div>
                 </td>
                 <td>
-                  <button className="ghost small" onClick={() => copyCommand(emp.slug)}>
-                    コマンドをコピー
-                  </button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", alignItems: "flex-start" }}>
+                    <button className="ghost small" onClick={() => copyCommand(emp.slug)}>
+                      Macコマンド
+                    </button>
+                    <button className="ghost small" onClick={() => copyCommandWindows(emp.slug)}>
+                      Windowsコマンド
+                    </button>
+                  </div>
                 </td>
                 <td>
                   <button className="ghost small danger" onClick={() => remove(emp)}>

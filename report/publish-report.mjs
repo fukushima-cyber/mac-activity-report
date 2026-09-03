@@ -25,6 +25,20 @@ async function readAppTotals(employeeSlug) {
   }
 }
 
+async function fetchRegisteredName(employeeSlug) {
+  if (!ORG_ID || !employeeSlug) return null;
+  try {
+    const res = await fetch(
+      `${DASHBOARD_URL}/api/employees/by-slug/${encodeURIComponent(ORG_ID)}/${encodeURIComponent(employeeSlug)}/public`
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchNotionToken(employeeSlug) {
   if (!INGEST_API_KEY) return { token: null, reportDbUrl: null };
   const url = new URL(`${DASHBOARD_URL}/api/notion-token`);
@@ -54,6 +68,10 @@ async function main() {
   }
 
   for (const r of reports) {
+    // 表示名はAIの推測に任せず、ダッシュボードの「社員」画面に登録された正式名で上書きする(未登録なら元の値のまま)
+    const registeredName = await fetchRegisteredName(r.employee_slug);
+    if (registeredName) r.employee_name = registeredName;
+
     // ダッシュボードへ
     if (INGEST_API_KEY) {
       const res = await fetch(`${DASHBOARD_URL}/api/reports/ingest`, {

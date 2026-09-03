@@ -28,29 +28,20 @@ setting() {
     })"
 }
 
-export SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$(setting shared_drive_path)}"
-export SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$PROJECT_DIR/data}"
+DEFAULT_SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$(setting shared_drive_path)}"
+DEFAULT_SHARED_DRIVE_PATH="${DEFAULT_SHARED_DRIVE_PATH:-$PROJECT_DIR/data}"
 export NOTION_REPORT_DB_URL="${NOTION_REPORT_DB_URL:-$(setting notion_report_db_url)}"
 
-PROMPT=$(sed \
-  -e "s|{{DATE}}|$DATE|g" \
-  -e "s|{{SHARED_DRIVE_PATH}}|$SHARED_DRIVE_PATH|g" \
-  "$SCRIPT_DIR/daily-report-prompt.md")
+echo "=== 社員ごとの格納先パスから当日分ログを集約 ==="
+COLLECTED_DIR="$(node "$SCRIPT_DIR/collect-employee-logs.mjs" "$DATE" "$DEFAULT_SHARED_DRIVE_PATH")"
+trap 'rm -rf "$COLLECTED_DIR"' EXIT
+export SHARED_DRIVE_PATH="$COLLECTED_DIR"
 
 cd "$PROJECT_DIR"
 
-echo "=== ログを分析(AI、Notion等への書き込み権限は与えない) ==="
+echo "=== ログを分析(社員ごとに並列実行。AI、Notion等への書き込み権限は与えない) ==="
 ANALYSIS_FILE="$(mktemp -t mac-activity-analysis).json"
-claude -p "$PROMPT" --allowedTools "Read" > "$ANALYSIS_FILE"
-# AIが前後に余計な文章を付けてしまった場合に備えて、最初の [ から最後の ] までを抜き出す
-node -e "
-const fs = require('fs');
-const raw = fs.readFileSync('$ANALYSIS_FILE', 'utf-8');
-const start = raw.indexOf('[');
-const end = raw.lastIndexOf(']');
-if (start === -1 || end === -1) { console.error('JSON配列が見つかりませんでした'); process.exit(1); }
-fs.writeFileSync('$ANALYSIS_FILE', raw.slice(start, end + 1));
-"
+node "$SCRIPT_DIR/analyze-parallel.mjs" "$DATE" "$SHARED_DRIVE_PATH" "$SCRIPT_DIR/daily-report-prompt.md" "$ANALYSIS_FILE"
 
 echo ""
 echo "=== レポート本文をNotion・ダッシュボードへ送信 ==="

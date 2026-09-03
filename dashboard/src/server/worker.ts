@@ -417,11 +417,12 @@ app.get("/api/employees", async (c) => {
 // 社員本人のセットアップ・エクスポートスクリプトが認証無しで読む用(組織ID+自分のスラッグを指定して自分の格納先パス・監視オンオフを取得できる)
 app.get("/api/employees/by-slug/:orgId/:slug/public", async (c) => {
   const row = await c.env.DB.prepare(
-    "SELECT drive_path, monitoring_enabled FROM employees WHERE org_id = ? AND slug = ?"
+    "SELECT name, drive_path, monitoring_enabled FROM employees WHERE org_id = ? AND slug = ?"
   )
     .bind(c.req.param("orgId"), c.req.param("slug"))
-    .first<{ drive_path: string | null; monitoring_enabled: number }>();
+    .first<{ name: string | null; drive_path: string | null; monitoring_enabled: number }>();
   return c.json({
+    name: row?.name ?? null,
     drive_path: row?.drive_path ?? null,
     monitoring_enabled: row ? row.monitoring_enabled === 1 : true,
   });

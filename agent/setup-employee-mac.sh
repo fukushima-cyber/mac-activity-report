@@ -71,6 +71,12 @@ EMPLOYEE_NAME=$EMP_NAME
 ORG_ID=$ORG_ID
 EOF
   echo ".envを作成しました。"
+
+  if [ -n "$SHARED_PATH" ]; then
+    echo "共有フォルダを一度開いて、Googleドライブの同期を先に済ませておきます..."
+    mkdir -p "$SHARED_PATH" 2>/dev/null || true
+    open "$SHARED_PATH" 2>/dev/null || true
+  fi
 fi
 
 echo "ActivityWatchを起動します(初回はアクセシビリティ権限の許可が必要です)..."

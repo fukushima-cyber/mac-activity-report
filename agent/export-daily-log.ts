@@ -19,7 +19,8 @@ const AW_HOST = process.env.AW_HOST ?? "http://localhost:5600";
 const OUTPUT_DIR =
   process.env.SHARED_DRIVE_PATH ??
   fileURLToPath(new URL("../data", import.meta.url)); // 未設定時はプロジェクト内のdata/に書く(プロトタイプ用)
-const EMPLOYEE_NAME = process.env.EMPLOYEE_NAME ?? process.env.USER ?? "unknown";
+// USERはmacOS/Linux、USERNAME はWindowsの環境変数名
+const EMPLOYEE_NAME = process.env.EMPLOYEE_NAME ?? process.env.USER ?? process.env.USERNAME ?? "unknown";
 const MIN_DURATION_SECONDS = 3; // これ未満の瞬間的な切り替えはノイズとして除外
 
 type AwEvent = {
@@ -97,6 +98,32 @@ async function monitoringEnabled(): Promise<boolean> {
   }
 }
 
+// 共有されたばかりのGoogle Driveフォルダは、同期が完了する前に書き込むと
+// 一時的なエラー(EAGAIN/「Unknown system error -11」等)を返すことがある。
+// 数秒待って再試行すれば大抵成功するため、待機を挟みながら数回リトライする。
+async function writeWithRetry(
+  fs: typeof import("node:fs/promises"),
+  outputDir: string,
+  outPath: string,
+  content: string,
+  maxAttempts = 5
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await fs.mkdir(outputDir, { recursive: true });
+      await fs.writeFile(outPath, content, "utf-8");
+      return;
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      const waitSeconds = attempt * 5; // 5s, 10s, 15s, 20s と少しずつ待つ
+      console.log(
+        `書き込みに失敗(試行${attempt}/${maxAttempts})、${waitSeconds}秒待って再試行します: ${(err as Error).message}`
+      );
+      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+    }
+  }
+}
+
 async function main() {
   if (!(await monitoringEnabled())) {
     console.log(`監視がオフに設定されているため、書き出しをスキップしました(${EMPLOYEE_NAME})。`);
@@ -127,9 +154,9 @@ async function main() {
   };
 
   const fs = await import("node:fs/promises");
-  await fs.mkdir(OUTPUT_DIR, { recursive: true });
-  const outPath = `${OUTPUT_DIR}/${date}_${EMPLOYEE_NAME}.json`;
-  await fs.writeFile(outPath, JSON.stringify(report, null, 2), "utf-8");
+  const path = await import("node:path");
+  const outPath = path.join(OUTPUT_DIR, `${date}_${EMPLOYEE_NAME}.json`);
+  await writeWithRetry(fs, OUTPUT_DIR, outPath, JSON.stringify(report, null, 2));
 
   console.log(`書き出し完了: ${outPath}`);
   console.log(`  稼働時間: ${(active_seconds / 3600).toFixed(1)}時間 / ウィンドウ切り替え: ${windows.length}件`);

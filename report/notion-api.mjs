@@ -1,7 +1,14 @@
 // Notion公式REST APIを直接叩く最小クライアント。組織ごとに発行されたトークンを使う。
 // MCP/Claude Codeの個人アカウント接続に依存しないための実装。
+// 1列目(タイトル列)は「日付」で中身は YYYY-MM-DD の日付文字列だけ、2列目「社員」に表示名を持つ。
+// 上書き判定用の安定した識別子(KEY_PROPERTY)はタイトルと独立して持っており、
+// 社員名を変更してもタイトルは変わるが識別子は変わらないため、重複ページが生まれない。
 
 const NOTION_VERSION = "2022-06-28";
+const TITLE_PROPERTY = "日付";
+// 旧レイアウトのタイトル列名(移行処理でのみ参照する)
+const LEGACY_TITLE_PROPERTY = "日付・社員";
+export const KEY_PROPERTY = "識別子";
 
 export function toDashedId(idOrUrl) {
   // app.notion.com/p/<id> 形式にも、www.notion.so/Title-<id> のような通常のページURL形式にも対応する。
@@ -47,12 +54,150 @@ export async function findPageByTitle(token, databaseId, titlePropertyName, titl
   return result.results[0]?.id ?? null;
 }
 
-export async function upsertReportPage(token, databaseId, { titleValue, properties, children }) {
-  const existingId = await findPageByTitle(token, databaseId, "日付・社員", titleValue);
+export async function findPageByKey(token, databaseId, keyValue) {
+  const result = await notionFetch(token, `/databases/${toDashedId(databaseId)}/query`, {
+    method: "POST",
+    body: JSON.stringify({
+      filter: { property: KEY_PROPERTY, rich_text: { equals: keyValue } },
+      page_size: 1,
+    }),
+  });
+  return result.results[0]?.id ?? null;
+}
+
+// DBのスキーマを新レイアウトへ揃えるための処理。プロセス内で同じDBに対して
+// 何度も確認しに行かないよう、確認済みのdatabaseIdをキャッシュしておく。
+// 新規に作られたDB(setup-notion.mjs経由)は最初から新形式なので、ここでは何もPATCHしない。
+const schemaEnsuredDbIds = new Set();
+
+// pageのproperties一覧から、type==="title"のプロパティ名とその値を取り出す。
+// タイトル列の名前は移行前後で変わりうるため、名前ではなくtypeで探す。
+function findTitleProperty(properties) {
+  for (const [name, value] of Object.entries(properties ?? {})) {
+    if (value?.type === "title") return { name, value };
+  }
+  return null;
+}
+
+function plainTextOf(richTextArray) {
+  return (richTextArray ?? []).map((t) => t.plain_text ?? "").join("");
+}
+
+export async function ensureSchema(token, databaseId) {
+  const dashedId = toDashedId(databaseId);
+  if (schemaEnsuredDbIds.has(dashedId)) return;
+
+  let changed = false;
+  const db = await notionFetch(token, `/databases/${dashedId}`);
+  const titleProp = findTitleProperty(db.properties);
+  const titleName = titleProp?.name;
+
+  // a〜b: 識別子列が無ければ追加
+  if (!db.properties?.[KEY_PROPERTY]) {
+    await notionFetch(token, `/databases/${dashedId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties: { [KEY_PROPERTY]: { rich_text: {} } } }),
+    });
+    console.log(`Notion DBに「${KEY_PROPERTY}」列を追加しました`);
+    changed = true;
+  }
+
+  // c: 旧・日付型の「日付」列(タイトルとは別物)が残っていれば削除する(承認済み)
+  const legacyDateProp = db.properties?.["日付"];
+  if (legacyDateProp && legacyDateProp.type === "date") {
+    await notionFetch(token, `/databases/${dashedId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties: { 日付: null } }),
+    });
+    console.log("Notion DBの旧「日付」列(日付型)を削除しました");
+    changed = true;
+  }
+
+  // d: タイトル列名が「日付」でなければリネーム(cで名前を空けた後に行う)
+  if (titleName && titleName !== TITLE_PROPERTY) {
+    await notionFetch(token, `/databases/${dashedId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties: { [titleName]: { name: TITLE_PROPERTY } } }),
+    });
+    console.log(`Notion DBのタイトル列を「${titleName}」から「${TITLE_PROPERTY}」へ改名しました`);
+    changed = true;
+  }
+
+  // e: 旧形式だった場合のみ、既存ページのタイトル/識別子を新形式へ一括移行する
+  if (changed) {
+    let migratedCount = 0;
+    let cursor = undefined;
+    do {
+      const query = await notionFetch(token, `/databases/${dashedId}/query`, {
+        method: "POST",
+        body: JSON.stringify({ page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) }),
+      });
+      for (const page of query.results) {
+        const pageTitleProp = findTitleProperty(page.properties);
+        const title = plainTextOf(pageTitleProp?.value?.title);
+        const key = plainTextOf(page.properties?.[KEY_PROPERTY]?.rich_text);
+
+        let newTitle = null;
+        let derivedKey = null;
+        const m1 = title.match(/^(\d{4}-\d{2}-\d{2})_(.+)$/);
+        const m2 = title.match(/^(\d{4}-\d{2}-\d{2}) .+$/);
+        const m3 = title.match(/^\d{4}-\d{2}-\d{2}$/);
+        if (m1) {
+          newTitle = m1[1];
+          derivedKey = title;
+        } else if (m2) {
+          newTitle = m2[1];
+          derivedKey = key || null;
+        } else if (m3) {
+          newTitle = title;
+          derivedKey = key || null;
+        } else {
+          console.log(`形式不明のためスキップ: ${title}`);
+          continue;
+        }
+
+        if (newTitle !== title || (derivedKey && derivedKey !== key)) {
+          await notionFetch(token, `/pages/${page.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              properties: {
+                [TITLE_PROPERTY]: { title: rt(newTitle) },
+                ...(derivedKey ? { [KEY_PROPERTY]: { rich_text: rt(derivedKey) } } : {}),
+              },
+            }),
+          });
+          migratedCount += 1;
+        }
+      }
+      cursor = query.has_more ? query.next_cursor : undefined;
+    } while (cursor);
+    if (migratedCount > 0) {
+      console.log(`既存ページ ${migratedCount} 件のタイトル/識別子を新形式に揃えました`);
+    }
+  }
+
+  schemaEnsuredDbIds.add(dashedId);
+}
+
+// 互換用エイリアス(旧名での呼び出しに対応)
+export const ensureKeyProperty = ensureSchema;
+
+export async function upsertReportPage(token, databaseId, { keyValue, titleValue, properties, children }) {
+  if (!keyValue) {
+    throw new Error("keyValue は必須です");
+  }
+  await ensureSchema(token, databaseId);
+  let existingId = await findPageByKey(token, databaseId, keyValue);
+  // 旧形式ではタイトル自体が識別子だったため、識別子列が未設定の既存ページはタイトル一致でも見つける。
+  // ensureSchemaが既にタイトル列を「日付」へ揃えているので、ここでのプロパティ名はTITLE_PROPERTYで良い。
+  // 見つかった場合はこのあとのPATCHで新形式のタイトル+識別子へ移行される。
+  if (!existingId) {
+    existingId = await findPageByTitle(token, databaseId, TITLE_PROPERTY, keyValue);
+  }
   const body = {
     properties: {
-      "日付・社員": { title: rt(titleValue) },
-      日付: { date: { start: properties.date } },
+      [TITLE_PROPERTY]: { title: rt(titleValue) },
+      [KEY_PROPERTY]: { rich_text: rt(keyValue) },
       社員: { rich_text: rt(properties.employeeName) },
       "稼働時間(h)": { number: properties.activeHours ?? null },
       作業内容の要約: { rich_text: rt(properties.summary) },

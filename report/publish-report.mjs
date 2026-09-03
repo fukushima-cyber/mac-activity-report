@@ -92,10 +92,10 @@ async function main() {
         const appTotals = await readAppTotals(r.employee_slug);
         const children = timelineToBlocks(r.timeline ?? [], r.day_note, appTotals);
         await upsertReportPage(notionToken, reportDbUrl, {
-          titleValue: `${DATE}_${r.employee_slug}`,
+          keyValue: `${DATE}_${r.employee_slug}`,          // 上書き判定用の安定した識別子(名前を変えても変わらない)
+          titleValue: DATE,                                // 1列目(タイトル)は日付だけ
           properties: {
-            date: DATE,
-            employeeName: r.employee_name,
+            employeeName: r.employee_name,                 // 2列目「社員」に表示名
             activeHours: r.active_hours,
             summary: r.summary,
             wasteNotes: r.waste_notes,

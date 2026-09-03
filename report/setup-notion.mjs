@@ -17,14 +17,14 @@ if (!token || !parentPageUrl) {
 
 async function main() {
   const reportDb = await createDatabase(token, parentPageUrl, "社員稼働レポート", {
-    "日付・社員": { title: {} },
-    日付: { date: {} },
-    社員: { rich_text: {} },
+    日付: { title: {} }, // 1列目(タイトル)は日付文字列(YYYY-MM-DD)のみ
+    社員: { rich_text: {} }, // 2列目に表示名
     "稼働時間(h)": { number: {} },
     作業内容の要約: { rich_text: {} },
     "無駄・非効率が疑われる点": { rich_text: {} },
     自動化できそうな作業: { rich_text: {} },
     ウィンドウ切替回数: { number: {} },
+    識別子: { rich_text: {} }, // 上書き判定用キー、ビューでは非表示推奨
   });
   console.log("「社員稼働レポート」を作成しました:");
   console.log(`  ${reportDb.url}`);

@@ -472,6 +472,23 @@ function EmployeesSection({
     load();
   };
 
+  // 表示名だけを変更する。スラッグ(ファイル名・本人PCの.env・Notionページのキーに使う識別子)は変えない。
+  // 変更後の名前は、次回のレポート生成から Notion・ダッシュボードのレポートに反映される。
+  const editName = async (emp: Employee) => {
+    const value = prompt(
+      `${emp.name} の表示名(レポートに載る名前)。識別子「${emp.slug}」は変わりません`,
+      emp.name
+    );
+    if (value === null) return;
+    const trimmed = value.trim();
+    if (!trimmed) {
+      alert("名前を空にはできません");
+      return;
+    }
+    await api(`/api/employees/${emp.id}`, { method: "PATCH", body: JSON.stringify({ name: trimmed }) });
+    load();
+  };
+
   // Notionトークンは秘密情報なので、現在値を画面に出さず常に空欄から入力させる
   const editNotionTokenOverride = async (emp: Employee) => {
     const value = prompt(
@@ -570,7 +587,14 @@ function EmployeesSection({
           <tbody>
             {employees.map((emp) => (
               <tr key={emp.id}>
-                <td>{emp.name}</td>
+                <td>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", alignItems: "flex-start" }}>
+                    <span>{emp.name}</span>
+                    <button className="ghost small" onClick={() => editName(emp)}>
+                      名前を編集
+                    </button>
+                  </div>
+                </td>
                 <td>{emp.note ?? "-"}</td>
                 <td>
                   <button className={`status-badge ${emp.status}`} onClick={() => toggleStatus(emp)}>

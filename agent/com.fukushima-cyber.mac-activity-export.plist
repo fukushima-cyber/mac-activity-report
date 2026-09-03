@@ -18,9 +18,9 @@
     <integer>50</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>__PROJECT_DIR__/agent/export.log</string>
+  <string>__LOG_DIR__/export.log</string>
   <key>StandardErrorPath</key>
-  <string>__PROJECT_DIR__/agent/export.error.log</string>
+  <string>__LOG_DIR__/export.error.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>

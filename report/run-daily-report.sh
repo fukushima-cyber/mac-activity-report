@@ -28,12 +28,18 @@ setting() {
     })"
 }
 
-DEFAULT_SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$(setting shared_drive_path)}"
-DEFAULT_SHARED_DRIVE_PATH="${DEFAULT_SHARED_DRIVE_PATH:-$PROJECT_DIR/data}"
+RESOLVED_SHARED_DRIVE_PATH="${SHARED_DRIVE_PATH:-$(setting shared_drive_path)}"
+DEFAULT_SHARED_DRIVE_PATH="${RESOLVED_SHARED_DRIVE_PATH:-$PROJECT_DIR/data}"
 export NOTION_REPORT_DB_URL="${NOTION_REPORT_DB_URL:-$(setting notion_report_db_url)}"
 
 echo "=== 社員ごとの格納先パスから当日分ログを集約 ==="
-COLLECTED_DIR="$(node "$SCRIPT_DIR/collect-employee-logs.mjs" "$DATE" "$DEFAULT_SHARED_DRIVE_PATH")"
+# 兄弟フォルダのスキャンは、共有ドライブのパスが実際に設定されている時だけ行う
+# ($PROJECT_DIR/data へのフォールバック時に、リポジトリルート配下を誤ってスキャンしないため)
+SIBLINGS_FLAG=""
+if [ -n "$RESOLVED_SHARED_DRIVE_PATH" ]; then
+  SIBLINGS_FLAG="--siblings"
+fi
+COLLECTED_DIR="$(node "$SCRIPT_DIR/collect-employee-logs.mjs" "$DATE" "$DEFAULT_SHARED_DRIVE_PATH" "$SIBLINGS_FLAG")"
 trap 'rm -rf "$COLLECTED_DIR"' EXIT
 export SHARED_DRIVE_PATH="$COLLECTED_DIR"
 
@@ -41,7 +47,16 @@ cd "$PROJECT_DIR"
 
 echo "=== ログを分析(社員ごとに並列実行。AI、Notion等への書き込み権限は与えない) ==="
 ANALYSIS_FILE="$(mktemp -t mac-activity-analysis).json"
+# analyze-parallel.mjsは一部/全員分の失敗を終了コード(1=全滅, 2=一部失敗)で伝えるため、
+# set -eで即終了させず、いったん自分で拾ってから続行するかどうかを判断する
+set +e
 node "$SCRIPT_DIR/analyze-parallel.mjs" "$DATE" "$SHARED_DRIVE_PATH" "$SCRIPT_DIR/daily-report-prompt.md" "$ANALYSIS_FILE"
+ANALYZE_STATUS=$?
+set -e
+if [ "$ANALYZE_STATUS" -eq 1 ]; then
+  echo "分析が全員分失敗したため中断します" >&2
+  exit 1
+fi
 
 echo ""
 echo "=== レポート本文をNotion・ダッシュボードへ送信 ==="
@@ -51,3 +66,8 @@ rm -f "$ANALYSIS_FILE"
 echo ""
 echo "=== 集計データ(アプリ別の稼働時間)をダッシュボードへ送信 ==="
 node "$SCRIPT_DIR/ingest-activity.mjs" "$DATE"
+
+if [ "$ANALYZE_STATUS" -eq 2 ]; then
+  echo "一部の社員の分析に失敗しました(上のログ参照)" >&2
+  exit 2
+fi

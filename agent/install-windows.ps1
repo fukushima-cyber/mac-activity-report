@@ -1,4 +1,4 @@
-# 各社員のWindows PCで実行する: 毎日23:50に自動でログを書き出すタスクを登録する
+﻿# 各社員のWindows PCで実行する: 毎日23:50に自動でログを書き出すタスクを登録する
 # macOSのlaunchd(agent/install.sh)に相当。Windowsのタスクスケジューラを使う。
 $ErrorActionPreference = "Stop"
 

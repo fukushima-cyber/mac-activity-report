@@ -49,6 +49,22 @@ function todayJst(): string {
   return jst.toISOString().slice(0, 10);
 }
 
+function yesterdayJst(): string {
+  const now = new Date();
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000 - 24 * 60 * 60 * 1000);
+  return jst.toISOString().slice(0, 10);
+}
+
+// 通常のタスクスケジューラ/launchdジョブは毎晩23:50に実行される。
+// それより前(正午より前)に走るのは、前夜のジョブが失敗した・PCがスリープしていた等で
+// Windowsのタスクスケジューラやmacのlaunchdが後追いで実行する「追いつき実行」であり、
+// その場合は「今日」ではなく「昨夜分(前日)」を書き出す必要がある。
+function defaultExportDate(): string {
+  const now = new Date();
+  const jstHour = new Date(now.getTime() + 9 * 60 * 60 * 1000).getUTCHours();
+  return jstHour < 12 ? yesterdayJst() : todayJst();
+}
+
 async function fetchBucketId(prefix: string): Promise<string> {
   const res = await fetch(`${AW_HOST}/api/0/buckets/`);
   if (!res.ok) throw new Error(`ActivityWatchに接続できません: ${res.status}`);
@@ -130,7 +146,7 @@ async function main() {
     return;
   }
 
-  const date = process.argv[2] ?? todayJst();
+  const date = process.argv[2] ?? defaultExportDate();
   const { start, end } = jstDateRange(date);
 
   const windowBucket = await fetchBucketId("aw-watcher-window_");

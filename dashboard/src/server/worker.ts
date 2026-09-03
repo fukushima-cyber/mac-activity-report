@@ -209,6 +209,7 @@ app.get("/api/notion-token/status", async (c) => {
 
 // 管理者Macのローカルスクリプトが、自分のINGEST_API_KEYを使って実際のトークン値を取りに来る用。
 // ?employee=<slug> を付けると、その社員に個別のNotion書き込み先が設定されていればそちらを優先して返す。
+// 認証済みルートなので、この時に登録済みの氏名(name)も一緒に返す(表示名の正本はこちら経由でのみ取得する)。
 app.get("/api/notion-token", async (c) => {
   const auth = c.req.header("Authorization");
   const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
@@ -219,21 +220,23 @@ app.get("/api/notion-token", async (c) => {
   if (!secretRow) return c.json({ error: "認証に失敗しました" }, 401);
 
   const employeeSlug = c.req.query("employee");
+  let name: string | null = null;
   if (employeeSlug) {
     const emp = await c.env.DB.prepare(
-      "SELECT notion_token, notion_report_db_url FROM employees WHERE org_id = ? AND slug = ?"
+      "SELECT name, notion_token, notion_report_db_url FROM employees WHERE org_id = ? AND slug = ?"
     )
       .bind(secretRow.org_id, employeeSlug)
-      .first<{ notion_token: string | null; notion_report_db_url: string | null }>();
+      .first<{ name: string | null; notion_token: string | null; notion_report_db_url: string | null }>();
+    name = emp?.name ?? null;
     if (emp?.notion_token) {
-      return c.json({ token: emp.notion_token, report_db_url: emp.notion_report_db_url ?? null });
+      return c.json({ token: emp.notion_token, report_db_url: emp.notion_report_db_url ?? null, name });
     }
   }
 
   const tokenRow = await c.env.DB.prepare("SELECT value FROM secrets WHERE org_id = ? AND key = 'notion_token'")
     .bind(secretRow.org_id)
     .first<{ value: string }>();
-  return c.json({ token: tokenRow?.value ?? null, report_db_url: null });
+  return c.json({ token: tokenRow?.value ?? null, report_db_url: null, name });
 });
 
 app.post("/api/activity/ingest", async (c) => {
@@ -415,14 +418,14 @@ app.get("/api/employees", async (c) => {
 });
 
 // 社員本人のセットアップ・エクスポートスクリプトが認証無しで読む用(組織ID+自分のスラッグを指定して自分の格納先パス・監視オンオフを取得できる)
+// 認証が無い公開エンドポイントなので、氏名(name)は含めない(取得はINGEST_API_KEYで認証する/api/notion-tokenへ)
 app.get("/api/employees/by-slug/:orgId/:slug/public", async (c) => {
   const row = await c.env.DB.prepare(
-    "SELECT name, drive_path, monitoring_enabled FROM employees WHERE org_id = ? AND slug = ?"
+    "SELECT drive_path, monitoring_enabled FROM employees WHERE org_id = ? AND slug = ?"
   )
     .bind(c.req.param("orgId"), c.req.param("slug"))
-    .first<{ name: string | null; drive_path: string | null; monitoring_enabled: number }>();
+    .first<{ drive_path: string | null; monitoring_enabled: number }>();
   return c.json({
-    name: row?.name ?? null,
     drive_path: row?.drive_path ?? null,
     monitoring_enabled: row ? row.monitoring_enabled === 1 : true,
   });

@@ -25,28 +25,16 @@ async function readAppTotals(employeeSlug) {
   }
 }
 
-async function fetchRegisteredName(employeeSlug) {
-  if (!ORG_ID || !employeeSlug) return null;
-  try {
-    const res = await fetch(
-      `${DASHBOARD_URL}/api/employees/by-slug/${encodeURIComponent(ORG_ID)}/${encodeURIComponent(employeeSlug)}/public`
-    );
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.name ?? null;
-  } catch {
-    return null;
-  }
-}
-
+// /api/employees/.../public は認証無しの公開エンドポイントのため氏名は返さない。
+// 表示名の取得は、INGEST_API_KEYで認証する/api/notion-token(この社員のトークンを取りに行くのと同じ呼び出し)に寄せる。
 async function fetchNotionToken(employeeSlug) {
-  if (!INGEST_API_KEY) return { token: null, reportDbUrl: null };
+  if (!INGEST_API_KEY) return { token: null, reportDbUrl: null, name: null };
   const url = new URL(`${DASHBOARD_URL}/api/notion-token`);
   if (employeeSlug) url.searchParams.set("employee", employeeSlug);
   const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` } });
-  if (!res.ok) return { token: null, reportDbUrl: null };
+  if (!res.ok) return { token: null, reportDbUrl: null, name: null };
   const json = await res.json();
-  return { token: json.token ?? null, reportDbUrl: json.report_db_url ?? null };
+  return { token: json.token ?? null, reportDbUrl: json.report_db_url ?? null, name: json.name ?? null };
 }
 
 async function main() {
@@ -68,9 +56,10 @@ async function main() {
   }
 
   for (const r of reports) {
-    // 表示名はAIの推測に任せず、ダッシュボードの「社員」画面に登録された正式名で上書きする(未登録なら元の値のまま)
-    const registeredName = await fetchRegisteredName(r.employee_slug);
-    if (registeredName) r.employee_name = registeredName;
+    // Notionトークン取得(社員ごとの個別設定があればそちらを優先、無ければ組織共通)と同じ認証済み呼び出しで、
+    // 登録された正式名も一緒に取得する。表示名はAIの推測に任せず、これで上書きする(未登録なら元の値のまま)
+    const { token: notionToken, reportDbUrl: employeeReportDbUrl, name } = await fetchNotionToken(r.employee_slug);
+    if (name) r.employee_name = name;
 
     // ダッシュボードへ
     if (INGEST_API_KEY) {
@@ -93,7 +82,6 @@ async function main() {
     }
 
     // Notionへ(社員ごとの個別設定があればそちらを優先、無ければ組織共通)
-    const { token: notionToken, reportDbUrl: employeeReportDbUrl } = await fetchNotionToken(r.employee_slug);
     const reportDbUrl = employeeReportDbUrl ?? NOTION_REPORT_DB_URL;
     if (!notionToken) {
       console.log(`Notionトークンが未設定のため、Notionへの書き込みはスキップします(${r.employee_name})。`);

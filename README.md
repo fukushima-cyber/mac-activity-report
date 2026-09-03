@@ -39,17 +39,19 @@ Notionへの書き込みは、Claude Codeの個人アカウント接続ではな
 
 ## 社員のPCへのセットアップ(Mac / Windows両対応)
 
-ダッシュボードで社員を追加すると、その人専用のセットアップコマンドがMac用・Windows用の両方が発行される(例: Mac `EMPLOYEE_NAME=tanaka ./agent/setup-employee-mac.sh` / Windows `$env:EMPLOYEE_NAME="tanaka"; .\agent\setup-employee-windows.ps1`)。本人の環境に合う方を1回実行してもらう。
+ダッシュボードで社員を追加すると、その人専用のセットアップコマンドがMac用・Windows用の両方が発行される(例: Mac `EMPLOYEE_NAME=tanaka ./agent/setup-employee-mac.sh` / Windows `$env:EMPLOYEE_NAME="tanaka"; $env:ORG_ID="<組織ID>"; powershell -ExecutionPolicy Bypass -File .\agent\setup-employee-windows.ps1`)。本人の環境に合う方を1回実行してもらう。
 
 ActivityWatch・Node.jsを自動インストールし、共有ドライブのパス(その人専用の登録があればそれ、無ければ全社共通のデフォルト)をダッシュボードから自動取得し、毎日23:50にログを書き出すジョブを登録する。
 
 - **Mac**: Homebrewが必要。実行後、システム設定でアクセシビリティ権限の許可が必要
-- **Windows**: wingetがあれば使い、無い環境(古いWindows・社内ポリシーでブロック等)ではGitHub/nodejs.orgから直接ダウンロードしてインストールする。スケジュールはタスクスケジューラ(`MacActivityReport-Export`というタスク名)に登録される。管理者側のレポート生成(`report/`)は引き続き福島さんのMacだけで動くため、社員がWindowsでも管理者側の対応は不要
+- **Windows**: wingetがあれば使い、無い環境(古いWindows・社内ポリシーでブロック等)ではGitHub/nodejs.orgから直接ダウンロードしてインストールする。スケジュールはタスクスケジューラ(`MacActivityReport-Export`というタスク名)に登録される。管理者側のレポート生成(`report/`)は引き続き福島さんのMacだけで動くため、社員がWindowsでも管理者側の対応は不要。zipでダウンロードしたコピーを使う場合、Windowsが「インターネットからダウンロードしたファイル」としてブロックすることがあるため、先に `Unblock-File -Path .\agent\*.ps1` を実行しておくとよい
 
 ## 管理者側のセットアップ(初回のみ)
 
+このリポジトリ自体は `~/Documents`・`~/Desktop`・`~/Downloads`・iCloud Drive・Google Driveなどの同期フォルダの配下に置かないこと。macOSのプライバシー保護(TCC)により、launchdからのアクセスが無音で失敗し、気付かないまま自動実行が止まる。`~/Projects` など保護対象外の場所に置く(`agent/install.sh`・`report/install.sh`は該当する場所に置かれていると起動時にエラーで止まる)。
+
 1. ダッシュボードの「設定」で共有ドライブのパス・NotionデータベースURLを保存し、「取り込み用トークンを発行」して表示された値を `report/.env` に `INGEST_API_KEY=<値>` として保存
-2. `./report/install.sh` で毎日9:00(前日分)の自動レポート生成を登録(Notionへの要約書き込み＋ダッシュボードへの集計送信を両方行う)
+2. `./report/install.sh` で毎日9:00(前日分)の自動レポート生成を登録(Notionへの要約書き込み＋ダッシュボードへの集計送信を両方行う)。実行ログは `~/Library/Logs/mac-activity-report/report.log`(エラーは `report.error.log`)に出力される
 3. 手動で今すぐ試す場合: `./report/run-daily-report.sh [YYYY-MM-DD]`
 
 ## オンオフ切り替え(あなたのMac)

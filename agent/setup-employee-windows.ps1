@@ -1,11 +1,11 @@
-# 社員のWindows PC1台につき1回、これを実行してもらうだけでセットアップ完了する。
+﻿# 社員のWindows PC1台につき1回、これを実行してもらうだけでセットアップ完了する。
 # ActivityWatch・Node.jsを自動インストールし、毎日23:50にログを共有フォルダへ書き出すタスクを登録する。
 # wingetがあればそれを使い、無い環境(古いWindows・社内ポリシーでブロック等)では
 # GitHub/nodejs.orgから直接ダウンロードしてインストールする。
 # APIキー・Notion・Claudeとの通信は一切行わない。
 #
 # 使い方(PowerShellで): EMPLOYEE_NAME・ORG_ID を環境変数で渡して実行
-#   $env:EMPLOYEE_NAME="tanaka"; $env:ORG_ID="<組織ID>"; .\agent\setup-employee-windows.ps1
+#   $env:EMPLOYEE_NAME="tanaka"; $env:ORG_ID="<組織ID>"; powershell -ExecutionPolicy Bypass -File .\agent\setup-employee-windows.ps1
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = $PSScriptRoot
@@ -29,16 +29,23 @@ function Install-NodeJsDirect {
   $msiUrl = "https://nodejs.org/dist/$version/node-$version-x64.msi"
   $msiPath = Join-Path $env:TEMP "node-$version-x64.msi"
   Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
-  Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $msiPath, "/quiet", "/norestart" -Wait
+  $p = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $msiPath, "/quiet", "/norestart" -Wait -PassThru
+  if ($p.ExitCode -ne 0) { throw "msiexec の終了コード: $($p.ExitCode)" }
   Remove-Item $msiPath -ErrorAction SilentlyContinue
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Write-Host "Node.jsをインストールします..."
-  if ($WingetAvailable) {
-    winget install --id OpenJS.NodeJS.LTS -e --silent --accept-package-agreements --accept-source-agreements
-  } else {
-    Install-NodeJsDirect
+  try {
+    if ($WingetAvailable) {
+      winget install --id OpenJS.NodeJS.LTS -e --silent --accept-package-agreements --accept-source-agreements
+      if ($LASTEXITCODE -ne 0) { throw "winget の終了コード: $LASTEXITCODE" }
+    } else {
+      Install-NodeJsDirect
+    }
+  } catch {
+    Write-Host "Node.jsのインストールに失敗しました: $_"
+    exit 1
   }
   Write-Host "Node.jsのインストール後、このウィンドウを閉じて新しくPowerShellを開き直してから、もう一度このスクリプトを実行してください(PATHの反映のため)。"
   exit 0
@@ -95,7 +102,8 @@ function Install-ActivityWatchDirect {
   if (-not $asset) { throw "Windows用インストーラーが見つかりませんでした" }
   $exePath = Join-Path $env:TEMP $asset.name
   Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exePath
-  Start-Process -FilePath $exePath -ArgumentList "/VERYSILENT", "/NORESTART", "/CURRENTUSER" -Wait
+  $p = Start-Process -FilePath $exePath -ArgumentList "/VERYSILENT", "/NORESTART", "/CURRENTUSER" -Wait -PassThru
+  if ($p.ExitCode -ne 0) { throw "ActivityWatchインストーラーの終了コード: $($p.ExitCode)" }
   Remove-Item $exePath -ErrorAction SilentlyContinue
 }
 
@@ -105,6 +113,7 @@ if (-not $AwExePath) {
   try {
     if ($WingetAvailable) {
       winget install --id ActivityWatch.ActivityWatch -e --silent --accept-package-agreements --accept-source-agreements
+      if ($LASTEXITCODE -ne 0) { throw "winget の終了コード: $LASTEXITCODE" }
     } else {
       Install-ActivityWatchDirect
     }
@@ -120,6 +129,10 @@ if (-not $AwExePath) {
 Set-Location $ProjectDir
 Write-Host "依存パッケージをインストールします..."
 npm install
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "npm install に失敗しました(終了コード $LASTEXITCODE)。"
+  exit 1
+}
 
 $EnvPath = Join-Path $ProjectDir "agent\.env"
 if (-not (Test-Path $EnvPath)) {

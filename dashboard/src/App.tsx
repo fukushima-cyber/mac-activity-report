@@ -490,7 +490,7 @@ function EmployeesSection({
     `cd mac-activity-report && EMPLOYEE_NAME=${slug} ORG_ID=${orgId} ./agent/setup-employee-mac.sh`;
 
   const setupCommandWindows = (slug: string) =>
-    `cd mac-activity-report; $env:EMPLOYEE_NAME="${slug}"; $env:ORG_ID="${orgId}"; .\\agent\\setup-employee-windows.ps1`;
+    `cd mac-activity-report; $env:EMPLOYEE_NAME="${slug}"; $env:ORG_ID="${orgId}"; powershell -ExecutionPolicy Bypass -File .\\agent\\setup-employee-windows.ps1`;
 
   const copyCommand = async (slug: string) => {
     await navigator.clipboard.writeText(setupCommand(slug));

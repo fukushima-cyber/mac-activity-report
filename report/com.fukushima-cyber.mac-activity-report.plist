@@ -18,9 +18,9 @@
     <integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>__PROJECT_DIR__/report/report.log</string>
+  <string>__LOG_DIR__/report.log</string>
   <key>StandardErrorPath</key>
-  <string>__PROJECT_DIR__/report/report.error.log</string>
+  <string>__LOG_DIR__/report.error.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>

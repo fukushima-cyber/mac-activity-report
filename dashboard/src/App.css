@@ -493,6 +493,12 @@ th {
   color: #8a5a12;
 }
 
+.status-badge.stale {
+  background: #fbe1c9;
+  color: #9a4412;
+  border-color: #f0c9a0;
+}
+
 .table-hint {
   font-size: 0.75rem;
   color: var(--faint);

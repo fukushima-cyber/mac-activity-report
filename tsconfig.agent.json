@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "outDir": "dashboard/public/install",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["agent/export-daily-log.ts"]
+}

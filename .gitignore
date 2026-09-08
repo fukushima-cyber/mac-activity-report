@@ -11,4 +11,9 @@ dashboard/dist/
 dashboard/.wrangler/
 dashboard/.oxlintrc.json.bak
 
+# npm run build:agent (dashboard/package.jsonのprebuildで自動生成される)のビルド成果物。
+# ソースはagent/export-daily-log.tsなのでコミットしない。デプロイ前に必ず `npm run build` を通すこと。
+dashboard/public/install/export-daily-log.mjs
+
 .DS_Store
+report/.tmp/

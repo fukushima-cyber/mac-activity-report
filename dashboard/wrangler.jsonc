@@ -18,5 +18,11 @@
       "database_id": "56fecbb5-6bd1-4431-afb3-873f2b1d0f1a",
       "migrations_dir": "migrations"
     }
+  ],
+  "r2_buckets": [
+    { "binding": "LOGS", "bucket_name": "mac-activity-logs" }
   ]
+  // 保管期間超過分の削除は、Workers無料プランのcron上限(アカウントで5個)に達しているため
+  // cronではなく、管理者Macの日次スクリプトが POST /api/logs/retention を叩いて行う。
+  // 有料プランへ移行した場合は "triggers": { "crons": ["0 18 * * *"] } を足せばscheduled()が動く。
 }

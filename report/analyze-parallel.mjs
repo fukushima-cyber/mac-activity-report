@@ -9,9 +9,14 @@
 //
 // 使い方: node report/analyze-parallel.mjs <DATE> <COLLECTED_DIR> <PROMPT_TEMPLATE_PATH> <OUTPUT_FILE>
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+
+// OSの一時フォルダ(/tmp等)ではなく、このプロジェクト配下に一時フォルダを作る。
+// claude -p はデフォルトでプロジェクトフォルダ外(/tmp含む)への読み取りを拒否するため。
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const TMP_ROOT = path.join(SCRIPT_DIR, ".tmp");
 
 const [date, collectedDir, promptTemplatePath, outputFile] = process.argv.slice(2);
 if (!date || !collectedDir || !promptTemplatePath || !outputFile) {
@@ -120,7 +125,8 @@ function runClaude(prompt) {
 }
 
 async function analyzeOne(fileName, template, maxAttempts = 3) {
-  const employeeDir = await fs.mkdtemp(path.join(os.tmpdir(), "mac-activity-single-"));
+  await fs.mkdir(TMP_ROOT, { recursive: true });
+  const employeeDir = await fs.mkdtemp(path.join(TMP_ROOT, "mac-activity-single-"));
   await fs.symlink(path.join(collectedDir, fileName), path.join(employeeDir, fileName));
 
   const prompt = template.replaceAll("{{DATE}}", date).replaceAll("{{SHARED_DRIVE_PATH}}", employeeDir);

@@ -1,0 +1,8 @@
+/install/windows.ps1
+  Content-Type: text/plain; charset=utf-8
+
+/install/mac.sh
+  Content-Type: text/plain; charset=utf-8
+
+/install/export-daily-log.mjs
+  Content-Type: text/plain; charset=utf-8

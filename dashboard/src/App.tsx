@@ -19,6 +19,10 @@ type Employee = {
   has_notion_override: number;
   monitoring_enabled: number;
   added_at: string;
+  has_upload_token: number | boolean;
+  upload_token_rotated_at: string | null;
+  last_upload_at: string | null;
+  last_upload_date: string | null;
 };
 
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
@@ -109,6 +113,7 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
 type Settings = {
   shared_drive_path?: string;
   notion_report_db_url?: string;
+  log_retention_days?: string;
 };
 
 function SettingsSection() {
@@ -180,12 +185,25 @@ function SettingsSection() {
             onChange={(e) => setSettings({ ...settings, notion_report_db_url: e.target.value })}
           />
         </label>
+        <label>
+          生ログの保管日数
+          <input
+            type="number"
+            min={1}
+            placeholder="90"
+            value={settings.log_retention_days ?? ""}
+            onChange={(e) => setSettings({ ...settings, log_retention_days: e.target.value })}
+          />
+        </label>
         <button type="submit">保存</button>
         {saved && <span className="saved-badge">保存しました</span>}
       </form>
       {error && <p className="error">{error}</p>}
       <p className="hint">
         共有ドライブのパスは、社員のセットアップコマンドが自動で読み込みます(セットアップ時に手入力する必要がなくなります)。NotionのURLは、日次レポート生成スクリプトがどのデータベースに書き込むかの参照先です。1人1日=1ページで、ページを開くと時間帯ごとのタイムラインとアプリ別内訳が載ります。
+      </p>
+      <p className="hint">
+        この日数を過ぎた社員PCからの生ログ(ウィンドウ操作の時系列)はダッシュボード側で自動削除されます。レポートと集計は残ります。
       </p>
 
       <hr className="divider" />
@@ -400,6 +418,29 @@ function AnalyticsSection({ employees }: { employees: Employee[] }) {
   );
 }
 
+// last_upload_at は D1 の CURRENT_TIMESTAMP なので "YYYY-MM-DD HH:MM:SS"(UTC)。
+// JSTの暦日に変換した上で、今日との差が3日以内かどうかを見る。
+function toJstDateOnly(d: Date): number {
+  const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+  return Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate());
+}
+
+function uploadFreshness(lastUploadAt: string): "active" | "stale" | "unknown" {
+  const uploaded = new Date(lastUploadAt.replace(" ", "T") + "Z");
+  if (Number.isNaN(uploaded.getTime())) return "unknown";
+  const diffDays = Math.round((toJstDateOnly(new Date()) - toJstDateOnly(uploaded)) / (24 * 60 * 60 * 1000));
+  return diffDays <= 3 ? "active" : "stale";
+}
+
+function uploadStatusBadge(emp: Employee): { cls: string; label: string } {
+  if (!emp.has_upload_token) return { cls: "pending", label: "未発行" };
+  if (!emp.last_upload_at) return { cls: "pending", label: "未導入" };
+  const freshness = uploadFreshness(emp.last_upload_at);
+  const dateLabel = emp.last_upload_date ? `(${emp.last_upload_date})` : "";
+  if (freshness === "active") return { cls: "active", label: `稼働中${dateLabel}` };
+  return { cls: "stale", label: `停止中${dateLabel}` };
+}
+
 function EmployeesSection({
   employees,
   load,
@@ -416,6 +457,9 @@ function EmployeesSection({
   const [error, setError] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState<Employee | null>(null);
   const [copied, setCopied] = useState(false);
+  const [uploadToken, setUploadToken] = useState<{ empId: string; token: string } | null>(null);
+  const [uploadCopiedKind, setUploadCopiedKind] = useState<"mac" | "windows" | null>(null);
+  const [showDriveCmd, setShowDriveCmd] = useState<Record<string, boolean>>({});
 
   const addEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -521,28 +565,81 @@ function EmployeesSection({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // 新方式(直接アップロード。docs/decisions/0003)の導入コマンド
+  const uploadCommandMac = (slug: string, token: string) =>
+    `curl -fsSL ${window.location.origin}/install/mac.sh | bash -s -- ${orgId} ${slug} ${token}`;
+
+  const uploadCommandWindows = (slug: string, token: string) =>
+    `$env:ORG_ID="${orgId}"; $env:EMPLOYEE_NAME="${slug}"; $env:UPLOAD_TOKEN="${token}"; irm ${window.location.origin}/install/windows.ps1 | iex`;
+
+  const issueUploadToken = async (emp: Employee) => {
+    if (
+      emp.has_upload_token &&
+      !confirm("再発行すると、今この人のPCに入っているトークンは使えなくなります。続けますか?")
+    ) {
+      return;
+    }
+    try {
+      const { token } = await api<{ token: string }>(`/api/employees/${emp.id}/upload-token/rotate`, {
+        method: "POST",
+      });
+      setUploadCopiedKind(null);
+      setUploadToken({ empId: emp.id, token });
+      load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "発行に失敗しました");
+    }
+  };
+
+  const copyUploadCommand = async (kind: "mac" | "windows", text: string) => {
+    await navigator.clipboard.writeText(text);
+    setUploadCopiedKind(kind);
+    setTimeout(() => setUploadCopiedKind(null), 2000);
+  };
+
   return (
     <div>
       {justAdded && (
         <div className="callout">
           <p>
-            <strong>{justAdded.name}</strong> を追加しました。本人のPCで、下のコマンドを1回実行してもらってください(Mac/Windowsどちらか本人の環境に合う方)。
+            <strong>{justAdded.name}</strong> を追加しました。下の社員一覧の行にある「導入コマンドを発行」から、本人のPCで実行するコマンドを発行してください。
           </p>
-          <div className="command-row">
-            <code>{setupCommand(justAdded.slug)}</code>
-            <button onClick={() => copyCommand(justAdded.slug)}>{copied ? "コピー済み" : "Macコマンドをコピー"}</button>
-          </div>
-          <div className="command-row">
-            <code>{setupCommandWindows(justAdded.slug)}</code>
-            <button onClick={() => copyCommandWindows(justAdded.slug)}>
-              {copied ? "コピー済み" : "Windowsコマンドをコピー"}
-            </button>
-          </div>
           <button className="ghost" onClick={() => setJustAdded(null)}>
             閉じる
           </button>
         </div>
       )}
+
+      {uploadToken &&
+        (() => {
+          const emp = employees.find((e) => e.id === uploadToken.empId);
+          if (!emp) return null;
+          const macCmd = uploadCommandMac(emp.slug, uploadToken.token);
+          const winCmd = uploadCommandWindows(emp.slug, uploadToken.token);
+          return (
+            <div className="callout">
+              <p>
+                <strong>{emp.name}</strong> 用の導入コマンドを発行しました。
+                このコマンドは今回だけ表示されます。閉じると再表示できないので、コピーして本人に渡してください。再発行すると古いコマンドは無効になります。
+              </p>
+              <div className="command-row">
+                <code>{macCmd}</code>
+                <button onClick={() => copyUploadCommand("mac", macCmd)}>
+                  {uploadCopiedKind === "mac" ? "コピー済み" : "Macコマンドをコピー"}
+                </button>
+              </div>
+              <div className="command-row">
+                <code>{winCmd}</code>
+                <button onClick={() => copyUploadCommand("windows", winCmd)}>
+                  {uploadCopiedKind === "windows" ? "コピー済み" : "Windowsコマンドをコピー"}
+                </button>
+              </div>
+              <button className="ghost" onClick={() => setUploadToken(null)}>
+                閉じる
+              </button>
+            </div>
+          );
+        })()}
 
       <section className="add-form">
         <h2>社員を追加</h2>
@@ -576,6 +673,7 @@ function EmployeesSection({
               <th>名前</th>
               <th>メモ</th>
               <th>状態</th>
+              <th>導入状況</th>
               <th>監視</th>
               <th>格納先パス</th>
               <th>Notionページ</th>
@@ -600,6 +698,16 @@ function EmployeesSection({
                   <button className={`status-badge ${emp.status}`} onClick={() => toggleStatus(emp)}>
                     {emp.status === "active" ? "導入済み" : "未導入"}
                   </button>
+                </td>
+                <td>
+                  {(() => {
+                    const badge = uploadStatusBadge(emp);
+                    return (
+                      <span className={`status-badge ${badge.cls}`} title={emp.last_upload_at ?? ""}>
+                        {badge.label}
+                      </span>
+                    );
+                  })()}
                 </td>
                 <td>
                   <button
@@ -642,12 +750,26 @@ function EmployeesSection({
                 </td>
                 <td>
                   <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", alignItems: "flex-start" }}>
-                    <button className="ghost small" onClick={() => copyCommand(emp.slug)}>
-                      Macコマンド
+                    <button className="ghost small" onClick={() => issueUploadToken(emp)}>
+                      {emp.has_upload_token ? "再発行" : "導入コマンドを発行"}
                     </button>
-                    <button className="ghost small" onClick={() => copyCommandWindows(emp.slug)}>
-                      Windowsコマンド
+                    <button
+                      type="button"
+                      className="ghost small"
+                      onClick={() => setShowDriveCmd((prev) => ({ ...prev, [emp.id]: !prev[emp.id] }))}
+                    >
+                      旧方式(Drive)のコマンド
                     </button>
+                    {showDriveCmd[emp.id] && (
+                      <>
+                        <button className="ghost small" onClick={() => copyCommand(emp.slug)}>
+                          {copied ? "コピー済み" : "Macコマンド(旧)"}
+                        </button>
+                        <button className="ghost small" onClick={() => copyCommandWindows(emp.slug)}>
+                          {copied ? "コピー済み" : "Windowsコマンド(旧)"}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </td>
                 <td>
@@ -659,7 +781,7 @@ function EmployeesSection({
             ))}
             {employees.length === 0 && (
               <tr>
-                <td colSpan={9} className="empty">
+                <td colSpan={10} className="empty">
                   まだ社員が登録されていません
                 </td>
               </tr>
@@ -667,7 +789,7 @@ function EmployeesSection({
           </tbody>
         </table>
         <p className="table-hint">
-          状態バッジをクリックすると「導入済み / 未導入」を、監視バッジをクリックすると「監視中 / オフ」を切り替えられます(オフにすると次回のログ書き出しから記録が止まります)
+          状態バッジをクリックすると「導入済み / 未導入」を、監視バッジをクリックすると「監視中 / オフ」を切り替えられます(オフにすると次回のログ書き出しから記録が止まります)。導入状況は新方式(直接アップロード)のトークン発行・アップロード実績から自動判定されます(未発行 → 未導入 → 稼働中 / 停止中)。停止中は最終アップロードから3日以上経っている状態です。
         </p>
       </section>
     </div>

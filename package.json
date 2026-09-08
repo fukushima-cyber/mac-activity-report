@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "export": "tsx agent/export-daily-log.ts",
-    "report": "tsx report/generate-report.ts"
+    "report": "tsx report/generate-report.ts",
+    "build:agent": "tsc -p tsconfig.agent.json && mv dashboard/public/install/export-daily-log.js dashboard/public/install/export-daily-log.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

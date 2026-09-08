@@ -8,9 +8,12 @@ import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
 } from "./auth";
+import { generateUploadToken, hashToken, retentionCutoffDate, storageKey, validateDailyLog, MAX_LOG_BYTES } from "./logs";
+import { R2LogStorage } from "./storage";
 
-type Bindings = { DB: D1Database };
+type Bindings = { DB: D1Database; LOGS: R2Bucket };
 type Variables = { managerId: string; orgId: string };
+const DEFAULT_RETENTION_DAYS = 90;
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -89,6 +92,21 @@ const PUBLIC_PATHS = [
   "/api/reports/ingest", // 同上
 ];
 
+// 各組織のINGEST_API_KEY(集計データ取り込み用トークン)からorg_idを解決する共通ヘルパー。
+// 管理者Macのローカルスクリプト向けエンドポイント(集計取り込み・ログ一覧/取得・トークン再発行)で使う。
+async function resolveIngestOrg(c: {
+  env: Bindings;
+  req: { header: (n: string) => string | undefined };
+}): Promise<string | null> {
+  const auth = c.req.header("Authorization");
+  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  const secret = await c.env.DB.prepare("SELECT org_id FROM secrets WHERE key = 'ingest_token' AND value = ?")
+    .bind(token)
+    .first<{ org_id: string }>();
+  return secret?.org_id ?? null;
+}
+
 async function resolveSession(c: { env: Bindings; req: { header: (n: string) => string | undefined } }, cookieValue: string | undefined) {
   if (!cookieValue) return null;
   const session = await c.env.DB.prepare(
@@ -107,7 +125,23 @@ app.use("/api/*", async (c, next) => {
 
   const isBearerNotionTokenGet = c.req.path === "/api/notion-token" && c.req.method === "GET";
 
-  if (PUBLIC_PATHS.includes(c.req.path) || isPublicBySlug || isBearerNotionTokenGet) return next();
+  // 直接アップロード方式(docs/decisions/0003): 社員トークン/INGEST_API_KEYで自前認証する経路
+  const isEmployeeLogUpload = c.req.path === "/api/logs/upload" && c.req.method === "POST";
+  const isBearerLogsGet = /^\/api\/logs(\/|$)/.test(c.req.path) && c.req.method === "GET";
+  const isBearerUploadTokenRotate =
+    /^\/api\/employees\/by-slug\/[^/]+\/upload-token\/rotate$/.test(c.req.path) && c.req.method === "POST";
+  const isBearerRetention = c.req.path === "/api/logs/retention" && c.req.method === "POST";
+
+  if (
+    PUBLIC_PATHS.includes(c.req.path) ||
+    isPublicBySlug ||
+    isBearerNotionTokenGet ||
+    isEmployeeLogUpload ||
+    isBearerLogsGet ||
+    isBearerUploadTokenRotate ||
+    isBearerRetention
+  )
+    return next();
 
   if (isPublicSettingsGet) {
     // ログイン済みならセッションからorgを、未ログインなら?orgクエリを使う(社員のセットアップスクリプト用)
@@ -148,7 +182,7 @@ app.get("/api/me", async (c) => {
 
 // --- 設定(共有ドライブのパス・Notionページ) ---
 
-const SETTINGS_KEYS = ["shared_drive_path", "notion_report_db_url"] as const;
+const SETTINGS_KEYS = ["shared_drive_path", "notion_report_db_url", "log_retention_days"] as const;
 
 app.get("/api/settings", async (c) => {
   // 未ログインでも読める公開エンドポイント(社員のセットアップスクリプト用)なので、org指定が必須
@@ -211,13 +245,8 @@ app.get("/api/notion-token/status", async (c) => {
 // ?employee=<slug> を付けると、その社員に個別のNotion書き込み先が設定されていればそちらを優先して返す。
 // 認証済みルートなので、この時に登録済みの氏名(name)も一緒に返す(表示名の正本はこちら経由でのみ取得する)。
 app.get("/api/notion-token", async (c) => {
-  const auth = c.req.header("Authorization");
-  const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!bearer) return c.json({ error: "認証に失敗しました" }, 401);
-  const secretRow = await c.env.DB.prepare("SELECT org_id FROM secrets WHERE key = 'ingest_token' AND value = ?")
-    .bind(bearer)
-    .first<{ org_id: string }>();
-  if (!secretRow) return c.json({ error: "認証に失敗しました" }, 401);
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
 
   const employeeSlug = c.req.query("employee");
   let name: string | null = null;
@@ -225,7 +254,7 @@ app.get("/api/notion-token", async (c) => {
     const emp = await c.env.DB.prepare(
       "SELECT name, notion_token, notion_report_db_url FROM employees WHERE org_id = ? AND slug = ?"
     )
-      .bind(secretRow.org_id, employeeSlug)
+      .bind(orgId, employeeSlug)
       .first<{ name: string | null; notion_token: string | null; notion_report_db_url: string | null }>();
     name = emp?.name ?? null;
     if (emp?.notion_token) {
@@ -234,19 +263,14 @@ app.get("/api/notion-token", async (c) => {
   }
 
   const tokenRow = await c.env.DB.prepare("SELECT value FROM secrets WHERE org_id = ? AND key = 'notion_token'")
-    .bind(secretRow.org_id)
+    .bind(orgId)
     .first<{ value: string }>();
   return c.json({ token: tokenRow?.value ?? null, report_db_url: null, name });
 });
 
 app.post("/api/activity/ingest", async (c) => {
-  const auth = c.req.header("Authorization");
-  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token) return c.json({ error: "認証に失敗しました" }, 401);
-  const secret = await c.env.DB.prepare("SELECT org_id FROM secrets WHERE key = 'ingest_token' AND value = ?")
-    .bind(token)
-    .first<{ org_id: string }>();
-  if (!secret) return c.json({ error: "認証に失敗しました" }, 401);
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
   const { employee_slug, date, apps } = await c.req.json<{
     employee_slug: string;
     date: string;
@@ -258,7 +282,7 @@ app.post("/api/activity/ingest", async (c) => {
   const stmts = apps.map((a) =>
     c.env.DB.prepare(
       "INSERT INTO activity (org_id, employee_slug, date, app, seconds) VALUES (?, ?, ?, ?, ?) ON CONFLICT(org_id, employee_slug, date, app) DO UPDATE SET seconds = excluded.seconds"
-    ).bind(secret.org_id, employee_slug, date, a.app, a.seconds)
+    ).bind(orgId, employee_slug, date, a.app, a.seconds)
   );
   if (stmts.length) await c.env.DB.batch(stmts);
   return c.json({ ok: true, count: stmts.length });
@@ -267,13 +291,8 @@ app.post("/api/activity/ingest", async (c) => {
 // --- レポート本文(要約・タイムライン)の取り込みと閲覧 ---
 
 app.post("/api/reports/ingest", async (c) => {
-  const auth = c.req.header("Authorization");
-  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token) return c.json({ error: "認証に失敗しました" }, 401);
-  const secret = await c.env.DB.prepare("SELECT org_id FROM secrets WHERE key = 'ingest_token' AND value = ?")
-    .bind(token)
-    .first<{ org_id: string }>();
-  if (!secret) return c.json({ error: "認証に失敗しました" }, 401);
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
   const body = await c.req.json<{
     employee_slug: string;
     employee_name: string;
@@ -297,7 +316,7 @@ app.post("/api/reports/ingest", async (c) => {
        timeline_json = excluded.timeline_json, updated_at = CURRENT_TIMESTAMP`
   )
     .bind(
-      secret.org_id,
+      orgId,
       body.employee_slug,
       body.date,
       body.employee_name ?? body.employee_slug,
@@ -367,6 +386,147 @@ app.get("/api/activity/by-employee", async (c) => {
   return c.json({ employees: results, days });
 });
 
+// --- 直接アップロード方式(docs/decisions/0003): 社員PCから日次ログを直接受け取る ---
+
+// 社員PCの書き出しスクリプトが、社員専用・アップロード専用トークンで送ってくる。
+// トークンはハッシュでしか照合しない(生の値はDBに残らない)。
+app.post("/api/logs/upload", async (c) => {
+  const auth = c.req.header("Authorization");
+  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return c.json({ error: "認証に失敗しました" }, 401);
+  const tokenHash = await hashToken(token);
+  const employee = await c.env.DB.prepare(
+    "SELECT org_id, slug, monitoring_enabled FROM employees WHERE upload_token_hash = ?"
+  )
+    .bind(tokenHash)
+    .first<{ org_id: string; slug: string; monitoring_enabled: number }>();
+  if (!employee) return c.json({ error: "認証に失敗しました" }, 401);
+
+  if (employee.monitoring_enabled === 0) {
+    // 監視オフの社員からは受け取らない(保存もしない)
+    return c.json({ skipped: true, reason: "monitoring_off" });
+  }
+
+  const text = await c.req.text();
+  const sizeBytes = new TextEncoder().encode(text).length;
+  if (sizeBytes > MAX_LOG_BYTES) {
+    return c.json({ error: "ログが大きすぎます(上限5MB)" }, 413);
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return c.json({ error: "JSONとして解釈できません" }, 400);
+  }
+
+  const validation = validateDailyLog(body, employee.slug);
+  if (!validation.ok) return c.json({ error: validation.error }, 400);
+
+  const key = storageKey(employee.org_id, employee.slug, validation.date);
+  const storage = new R2LogStorage(c.env.LOGS);
+  await storage.put(key, text);
+
+  await c.env.DB.prepare(
+    `INSERT INTO uploads (org_id, employee_slug, date, storage_key, size, uploaded_at)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(org_id, employee_slug, date) DO UPDATE SET
+       storage_key = excluded.storage_key, size = excluded.size, uploaded_at = CURRENT_TIMESTAMP`
+  )
+    .bind(employee.org_id, employee.slug, validation.date, key, sizeBytes)
+    .run();
+
+  return c.json({ ok: true, date: validation.date, size: sizeBytes });
+});
+
+// 管理者Mac側の集計スクリプトが、INGEST_API_KEYでその日のアップロード状況を取りに来る
+app.get("/api/logs", async (c) => {
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
+  const date = c.req.query("date");
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return c.json({ error: "date(YYYY-MM-DD)が必要です" }, 400);
+  }
+  const { results } = await c.env.DB.prepare(
+    "SELECT employee_slug, date, size, uploaded_at FROM uploads WHERE org_id = ? AND date = ? ORDER BY employee_slug"
+  )
+    .bind(orgId, date)
+    .all();
+  return c.json(results);
+});
+
+// 集計サーバー(VPS)が「レポートを作り直す必要がある社員・日」を取りに来る(docs/decisions/0004)。
+// 判定: その日のアップロード(uploads.uploaded_at)が、その日のレポート(reports.updated_at)より新しい、
+// またはレポートがまだ無い。社員PCは起動中30分おきに過去数日分を送り直すため、
+// 朝の1回きりの処理では取りこぼす「遅れて届いた分」をこれで拾う。両方ともD1のCURRENT_TIMESTAMP(UTC)なので文字列比較でよい。
+app.get("/api/logs/pending", async (c) => {
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  const isDate = (s: string | undefined): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  if (!isDate(from) || !isDate(to)) {
+    return c.json({ error: "from/to(YYYY-MM-DD)が必要です" }, 400);
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT u.employee_slug, u.date, u.uploaded_at, r.updated_at AS reported_at
+       FROM uploads u
+       LEFT JOIN reports r ON r.org_id = u.org_id AND r.employee_slug = u.employee_slug AND r.date = u.date
+      WHERE u.org_id = ? AND u.date BETWEEN ? AND ?
+        AND (r.updated_at IS NULL OR u.uploaded_at > r.updated_at)
+      ORDER BY u.date, u.employee_slug`
+  )
+    .bind(orgId, from, to)
+    .all();
+  return c.json(results);
+});
+
+// 同上。特定社員・特定日のログ本文(JSON)を取りに来る
+app.get("/api/logs/:slug/:date", async (c) => {
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
+  const row = await c.env.DB.prepare(
+    "SELECT storage_key FROM uploads WHERE org_id = ? AND employee_slug = ? AND date = ?"
+  )
+    .bind(orgId, c.req.param("slug"), c.req.param("date"))
+    .first<{ storage_key: string }>();
+  if (!row) return c.json({ error: "見つかりません" }, 404);
+  const storage = new R2LogStorage(c.env.LOGS);
+  const text = await storage.get(row.storage_key);
+  if (text === null) return c.json({ error: "見つかりません" }, 404);
+  return c.body(text, 200, { "Content-Type": "application/json" });
+});
+
+// アップロードトークンの再発行。表示は1回だけ(以降サーバー側にはハッシュしか残らない)
+app.post("/api/employees/:id/upload-token/rotate", async (c) => {
+  const token = generateUploadToken();
+  const tokenHash = await hashToken(token);
+  const result = await c.env.DB.prepare(
+    "UPDATE employees SET upload_token_hash = ?, upload_token_rotated_at = CURRENT_TIMESTAMP WHERE id = ? AND org_id = ?"
+  )
+    .bind(tokenHash, c.req.param("id"), c.get("orgId"))
+    .run();
+  // 存在しないidに対してトークンを返してしまわないよう、更新行数を確認する
+  if (!result.meta.changes) return c.json({ error: "社員が見つかりません" }, 404);
+  return c.json({ token });
+});
+
+// 同上。管理者スクリプトからslug指定で叩けるバージョン(INGEST_API_KEY認証)
+app.post("/api/employees/by-slug/:slug/upload-token/rotate", async (c) => {
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
+  const token = generateUploadToken();
+  const tokenHash = await hashToken(token);
+  const result = await c.env.DB.prepare(
+    "UPDATE employees SET upload_token_hash = ?, upload_token_rotated_at = CURRENT_TIMESTAMP WHERE slug = ? AND org_id = ?"
+  )
+    .bind(tokenHash, c.req.param("slug"), orgId)
+    .run();
+  // 存在しないslugに対してトークンを返してしまわないよう、更新行数を確認する
+  if (!result.meta.changes) return c.json({ error: "社員が見つかりません" }, 404);
+  return c.json({ token });
+});
+
 // --- マネージャー管理(ログイン中の人が、同じ組織内に招待できる) ---
 
 app.get("/api/managers", async (c) => {
@@ -407,10 +567,21 @@ app.delete("/api/managers/:id", async (c) => {
 // --- 社員管理 ---
 
 app.get("/api/employees", async (c) => {
+  // 各社員の最終アップロード(uploadsの最新1件)をLEFT JOINで一緒に返す。P4のUI(導入状況表示)用
   const { results } = await c.env.DB.prepare(
-    `SELECT id, name, slug, note, status, drive_path, notion_page_url, monitoring_enabled, added_at,
-            notion_report_db_url, (notion_token IS NOT NULL) as has_notion_override
-     FROM employees WHERE org_id = ? ORDER BY added_at DESC`
+    `SELECT e.id as id, e.name as name, e.slug as slug, e.note as note, e.status as status,
+            e.drive_path as drive_path, e.notion_page_url as notion_page_url,
+            e.monitoring_enabled as monitoring_enabled, e.added_at as added_at,
+            e.notion_report_db_url as notion_report_db_url, (e.notion_token IS NOT NULL) as has_notion_override,
+            e.upload_token_rotated_at as upload_token_rotated_at, (e.upload_token_hash IS NOT NULL) as has_upload_token,
+            u.uploaded_at as last_upload_at, u.date as last_upload_date
+     FROM employees e
+     LEFT JOIN (
+       SELECT org_id, employee_slug, date, uploaded_at,
+              ROW_NUMBER() OVER (PARTITION BY org_id, employee_slug ORDER BY uploaded_at DESC) as rn
+       FROM uploads
+     ) u ON u.org_id = e.org_id AND u.employee_slug = e.slug AND u.rn = 1
+     WHERE e.org_id = ? ORDER BY e.added_at DESC`
   )
     .bind(c.get("orgId"))
     .all();
@@ -510,4 +681,52 @@ app.delete("/api/employees/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-export default app;
+// --- 生ログの保管期間管理(日次cron) ---
+// 組織ごとの settings.log_retention_days(未設定なら既定90日)より古い日付のuploadsを、
+// R2オブジェクトごと削除する。集計・レポート(D1のactivity/reports)は対象外で残す。
+// 1組織分の削除処理。cron(scheduled)と、管理者スクリプトからのPOST /api/logs/retention の両方から使う。
+// (Workers無料プランはcronがアカウント全体で5個までのため、cronが登録できない環境では
+//  毎朝のレポート生成スクリプトがこのエンドポイントを叩いて同じ処理を行う)
+async function runRetentionForOrg(env: Bindings, orgId: string, now = new Date()) {
+  const storage = new R2LogStorage(env.LOGS);
+  const settingRow = await env.DB.prepare(
+    "SELECT value FROM settings WHERE org_id = ? AND key = 'log_retention_days'"
+  )
+    .bind(orgId)
+    .first<{ value: string }>();
+  const parsedDays = settingRow?.value ? Number(settingRow.value) : NaN;
+  const days = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : DEFAULT_RETENTION_DAYS;
+  const cutoff = retentionCutoffDate(now, days);
+
+  const { results: expired } = await env.DB.prepare(
+    "SELECT storage_key FROM uploads WHERE org_id = ? AND date < ?"
+  )
+    .bind(orgId, cutoff)
+    .all<{ storage_key: string }>();
+
+  for (const row of expired) {
+    await storage.delete(row.storage_key);
+  }
+  if (expired.length) {
+    await env.DB.prepare("DELETE FROM uploads WHERE org_id = ? AND date < ?").bind(orgId, cutoff).run();
+  }
+  console.log(`[retention] org=${orgId} days=${days} cutoff=${cutoff} deleted=${expired.length}`);
+  return { days, cutoff, deleted: expired.length };
+}
+
+// 管理者Macの日次スクリプトから叩く(INGEST_API_KEY認証)。その組織の期限切れ生ログを削除する
+app.post("/api/logs/retention", async (c) => {
+  const orgId = await resolveIngestOrg(c);
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
+  const result = await runRetentionForOrg(c.env, orgId);
+  return c.json({ ok: true, ...result });
+});
+
+async function scheduled(_event: ScheduledEvent, env: Bindings): Promise<void> {
+  const { results: orgs } = await env.DB.prepare("SELECT id FROM organizations").all<{ id: string }>();
+  for (const org of orgs) {
+    await runRetentionForOrg(env, org.id);
+  }
+}
+
+export default { fetch: app.fetch, scheduled };

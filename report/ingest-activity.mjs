@@ -19,7 +19,7 @@ function jstYesterday() {
 async function fetchSetting(key) {
   const orgId = process.env.ORG_ID;
   if (!orgId) return null;
-  const res = await fetch(`${DASHBOARD_URL}/api/settings?org=${encodeURIComponent(orgId)}`);
+  const res = await fetch(`${DASHBOARD_URL}/api/settings?org=${encodeURIComponent(orgId)}`, { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) return null;
   const json = await res.json();
   return json[key] ?? null;
@@ -29,13 +29,13 @@ async function main() {
   const date = process.argv[2] ?? jstYesterday();
   if (!INGEST_API_KEY) {
     console.error("INGEST_API_KEYが未設定です(report/.env)。ダッシュボードの「設定」からトークンを発行してください。集計送信をスキップします。");
-    return;
+    throw new Error("INGEST_API_KEY is required");
   }
 
   const sharedDrivePath = process.env.SHARED_DRIVE_PATH ?? (await fetchSetting("shared_drive_path"));
   if (!sharedDrivePath) {
     console.error("共有フォルダのパスが分かりません。集計送信をスキップします。");
-    return;
+    throw new Error("Log directory is required");
   }
 
   const files = (await fs.readdir(sharedDrivePath)).filter(
@@ -52,11 +52,13 @@ async function main() {
 
     const res = await fetch(`${DASHBOARD_URL}/api/activity/ingest`, {
       method: "POST",
+      signal: AbortSignal.timeout(30_000),
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${INGEST_API_KEY}` },
       body: JSON.stringify({ employee_slug: raw.employee, date: raw.date, apps }),
     });
     if (!res.ok) {
       console.error(`送信失敗(${raw.employee}): ${res.status} ${await res.text()}`);
+      process.exitCode = 1;
     } else {
       console.log(`送信完了: ${raw.employee} ${raw.date} (${apps.length}アプリ)`);
     }

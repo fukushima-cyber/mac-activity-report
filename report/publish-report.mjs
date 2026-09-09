@@ -4,9 +4,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { upsertReportPage, timelineToBlocks } from "./notion-api.mjs";
 import { computeAppTotals } from "./aggregate-apps.mjs";
+import { publishReports } from "./publish-pipeline.mjs";
+import { validateAnalysis } from "./report-validation.mjs";
 
 const DASHBOARD_URL = process.env.DASHBOARD_URL ?? "https://log.bonkers.llc";
-const ORG_ID = process.env.ORG_ID;
 const INGEST_API_KEY = process.env.INGEST_API_KEY;
 const NOTION_REPORT_DB_URL = process.env.NOTION_REPORT_DB_URL;
 const SHARED_DRIVE_PATH = process.env.SHARED_DRIVE_PATH;
@@ -31,8 +32,8 @@ async function fetchNotionToken(employeeSlug) {
   if (!INGEST_API_KEY) return { token: null, reportDbUrl: null, name: null };
   const url = new URL(`${DASHBOARD_URL}/api/notion-token`);
   if (employeeSlug) url.searchParams.set("employee", employeeSlug);
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` } });
-  if (!res.ok) return { token: null, reportDbUrl: null, name: null };
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` }, signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`Notion設定の取得に失敗しました: ${res.status}`);
   const json = await res.json();
   return { token: json.token ?? null, reportDbUrl: json.report_db_url ?? null, name: json.name ?? null };
 }
@@ -47,24 +48,45 @@ async function main() {
   try {
     reports = JSON.parse(raw);
   } catch {
-    console.error("AIの出力がJSONとして解釈できませんでした。内容:", raw.slice(0, 500));
+    console.error("AIの出力がJSONとして解釈できませんでした。");
     process.exit(1);
   }
-  if (!Array.isArray(reports) || reports.length === 0) {
+  if (!Array.isArray(reports)) throw new Error("Expected a report array");
+  if (reports.length === 0) {
     console.log("対象レポートなし");
     return;
   }
 
-  for (const r of reports) {
+  if (!INGEST_API_KEY) throw new Error("INGEST_API_KEY is required");
+  if (!SHARED_DRIVE_PATH) throw new Error("Source log directory is required");
+  const sourceFiles = new Set(await fs.readdir(SHARED_DRIVE_PATH));
+  const seen = new Set();
+  for (const report of reports) {
+    validateAnalysis([report], report?.employee_slug);
+    if (!sourceFiles.has(`${DATE}_${report.employee_slug}.json`) || seen.has(report.employee_slug)) {
+      throw new Error("Missing or duplicate source employee");
+    }
+    seen.add(report.employee_slug);
+  }
+  let versions = {};
+  try {
+    versions = JSON.parse(await fs.readFile(path.join(SHARED_DRIVE_PATH, ".source-versions.json"), "utf-8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  await publishReports(reports, {
     // Notionトークン取得(社員ごとの個別設定があればそちらを優先、無ければ組織共通)と同じ認証済み呼び出しで、
     // 登録された正式名も一緒に取得する。表示名はAIの推測に任せず、これで上書きする(未登録なら元の値のまま)
-    const { token: notionToken, reportDbUrl: employeeReportDbUrl, name } = await fetchNotionToken(r.employee_slug);
-    if (name) r.employee_name = name;
+    notionConfig: async (slug) => {
+      const config = await fetchNotionToken(slug);
+      return { ...config, reportDbUrl: config.reportDbUrl ?? NOTION_REPORT_DB_URL };
+    },
 
     // ダッシュボードへ
-    if (INGEST_API_KEY) {
+    publishDashboard: async (r) => {
       const res = await fetch(`${DASHBOARD_URL}/api/reports/ingest`, {
         method: "POST",
+        signal: AbortSignal.timeout(30_000),
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${INGEST_API_KEY}` },
         body: JSON.stringify({
           employee_slug: r.employee_slug,
@@ -76,19 +98,15 @@ async function main() {
           waste_notes: r.waste_notes,
           automation_notes: r.automation_notes,
           timeline: r.timeline,
+          source_upload_version: versions[r.employee_slug] ?? undefined,
         }),
       });
-      console.log(`ダッシュボードへ送信(${r.employee_name}): ${res.ok ? "成功" : "失敗 " + res.status}`);
-    }
+      if (!res.ok) throw new Error(`ダッシュボード送信失敗: ${res.status}`);
+      console.log(`ダッシュボードへ送信(${r.employee_name}): 成功`);
+    },
 
     // Notionへ(社員ごとの個別設定があればそちらを優先、無ければ組織共通)
-    const reportDbUrl = employeeReportDbUrl ?? NOTION_REPORT_DB_URL;
-    if (!notionToken) {
-      console.log(`Notionトークンが未設定のため、Notionへの書き込みはスキップします(${r.employee_name})。`);
-    } else if (!reportDbUrl) {
-      console.log(`Notionの書き込み先DBが未設定のため、スキップします(${r.employee_name})。`);
-    } else {
-      try {
+    publishNotion: async (r, { token: notionToken, reportDbUrl }) => {
         const appTotals = await readAppTotals(r.employee_slug);
         const children = timelineToBlocks(r.timeline ?? [], r.day_note, appTotals);
         await upsertReportPage(notionToken, reportDbUrl, {
@@ -105,11 +123,8 @@ async function main() {
           children,
         });
         console.log(`Notionへ書き込み完了(${r.employee_name})`);
-      } catch (err) {
-        console.error(`Notion書き込み失敗(${r.employee_name}):`, err.message);
-      }
-    }
-  }
+    },
+  });
 }
 
 main().catch((err) => {

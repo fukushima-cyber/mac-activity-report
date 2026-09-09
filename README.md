@@ -4,6 +4,8 @@ Mac操作ログ(アプリ・ウィンドウタイトル)を自動記録し、AI�
 
 ## 構成
 
+2026-09-10の障害予防修正と、本番反映順・残る制約は [障害復旧の記録](docs/reliability-2026-09-10.md) を参照。
+
 - `agent/` … 各社員のMacで動く記録側。ActivityWatch + 書き出しスクリプト。APIキー・ネットワーク送信なし
 - `report/` … 管理者のMacだけで動く集計側。共有フォルダの当日分ログを読み、`claude -p`で要約してNotionへ投稿
 
@@ -63,7 +65,7 @@ Notionへの書き込みは、Claude Codeの個人アカウント接続ではな
 
 ログの出力先: Mac `~/Library/Logs/mac-activity-report/export.log`(エラーは `export.error.log`)、Windows は `%LOCALAPPDATA%\mac-activity-agent\` 配下に手動実行時の出力が出る(タスクスケジューラの実行履歴からも確認可)。手動で再実行する場合は `node ~/mac-activity-agent/export-daily-log.mjs`(Windowsは `node "$env:LOCALAPPDATA\mac-activity-agent\export-daily-log.mjs"`)。
 
-**既知の制約**: アップロードに失敗した日のログはPC内(`~/mac-activity-agent/logs/`)にも残るが、「前回アップロードできなかった日」を自動検知して次回再送する仕組みは無い。失敗が続く場合は上記コマンドで日付を指定して手動再送する(`node export-daily-log.mjs 2026-09-03`)。
+過去3日より前の未送信ログも、PC内(`~/mac-activity-agent/logs/`)に残っていれば直近90日分を照合し、1回につき最大10件再送する。送信成功済みの内容は再送しない。90日を超えた分やPC内にまだ書き出されていない日付は手動確認が必要。
 
 ## 旧方式(Google Drive)
 

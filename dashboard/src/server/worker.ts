@@ -302,18 +302,19 @@ app.post("/api/reports/ingest", async (c) => {
     summary?: string;
     waste_notes?: string;
     automation_notes?: string;
+    source_upload_version?: string;
     timeline?: { time_range: string; duration: string; main_app: string; description: string }[];
   }>();
   if (!body.employee_slug || !body.date) {
     return c.json({ error: "employee_slug, date は必須です" }, 400);
   }
   await c.env.DB.prepare(
-    `INSERT INTO reports (org_id, employee_slug, date, employee_name, active_hours, window_count, summary, waste_notes, automation_notes, timeline_json, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `INSERT INTO reports (org_id, employee_slug, date, employee_name, active_hours, window_count, summary, waste_notes, automation_notes, timeline_json, source_upload_version, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(org_id, employee_slug, date) DO UPDATE SET
        employee_name = excluded.employee_name, active_hours = excluded.active_hours, window_count = excluded.window_count,
        summary = excluded.summary, waste_notes = excluded.waste_notes, automation_notes = excluded.automation_notes,
-       timeline_json = excluded.timeline_json, updated_at = CURRENT_TIMESTAMP`
+       timeline_json = excluded.timeline_json, source_upload_version = excluded.source_upload_version, updated_at = CURRENT_TIMESTAMP`
   )
     .bind(
       orgId,
@@ -325,7 +326,8 @@ app.post("/api/reports/ingest", async (c) => {
       body.summary ?? null,
       body.waste_notes ?? null,
       body.automation_notes ?? null,
-      JSON.stringify(body.timeline ?? [])
+      JSON.stringify(body.timeline ?? []),
+      body.source_upload_version ?? null
     )
     .run();
   return c.json({ ok: true });
@@ -428,12 +430,12 @@ app.post("/api/logs/upload", async (c) => {
   await storage.put(key, text);
 
   await c.env.DB.prepare(
-    `INSERT INTO uploads (org_id, employee_slug, date, storage_key, size, uploaded_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `INSERT INTO uploads (org_id, employee_slug, date, storage_key, size, upload_version, uploaded_at)
+     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(org_id, employee_slug, date) DO UPDATE SET
-       storage_key = excluded.storage_key, size = excluded.size, uploaded_at = CURRENT_TIMESTAMP`
+       storage_key = excluded.storage_key, size = excluded.size, upload_version = excluded.upload_version, uploaded_at = CURRENT_TIMESTAMP`
   )
-    .bind(employee.org_id, employee.slug, validation.date, key, sizeBytes)
+    .bind(employee.org_id, employee.slug, validation.date, key, sizeBytes, crypto.randomUUID())
     .run();
 
   return c.json({ ok: true, date: validation.date, size: sizeBytes });
@@ -456,9 +458,9 @@ app.get("/api/logs", async (c) => {
 });
 
 // 集計サーバー(VPS)が「レポートを作り直す必要がある社員・日」を取りに来る(docs/decisions/0004)。
-// 判定: その日のアップロード(uploads.uploaded_at)が、その日のレポート(reports.updated_at)より新しい、
-// またはレポートがまだ無い。社員PCは起動中30分おきに過去数日分を送り直すため、
-// 朝の1回きりの処理では取りこぼす「遅れて届いた分」をこれで拾う。両方ともD1のCURRENT_TIMESTAMP(UTC)なので文字列比較でよい。
+// 判定: アップロードの版が分析元の版と異なる、またはレポートがまだ無い。
+// 版のない旧ログのみ時刻比較へフォールバックする。社員PCは起動中30分おきに過去数日分を送り直すため、
+// 朝の1回きりの処理では取りこぼす「遅れて届いた分」をこれで拾う。
 app.get("/api/logs/pending", async (c) => {
   const orgId = await resolveIngestOrg(c);
   if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
@@ -473,7 +475,9 @@ app.get("/api/logs/pending", async (c) => {
        FROM uploads u
        LEFT JOIN reports r ON r.org_id = u.org_id AND r.employee_slug = u.employee_slug AND r.date = u.date
       WHERE u.org_id = ? AND u.date BETWEEN ? AND ?
-        AND (r.updated_at IS NULL OR u.uploaded_at > r.updated_at)
+        AND (r.updated_at IS NULL
+          OR (u.upload_version IS NOT NULL AND u.upload_version IS NOT r.source_upload_version)
+          OR (u.upload_version IS NULL AND u.uploaded_at > r.updated_at))
       ORDER BY u.date, u.employee_slug`
   )
     .bind(orgId, from, to)
@@ -486,15 +490,18 @@ app.get("/api/logs/:slug/:date", async (c) => {
   const orgId = await resolveIngestOrg(c);
   if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
   const row = await c.env.DB.prepare(
-    "SELECT storage_key FROM uploads WHERE org_id = ? AND employee_slug = ? AND date = ?"
+    "SELECT storage_key, upload_version FROM uploads WHERE org_id = ? AND employee_slug = ? AND date = ?"
   )
     .bind(orgId, c.req.param("slug"), c.req.param("date"))
-    .first<{ storage_key: string }>();
+    .first<{ storage_key: string; upload_version: string | null }>();
   if (!row) return c.json({ error: "見つかりません" }, 404);
   const storage = new R2LogStorage(c.env.LOGS);
   const text = await storage.get(row.storage_key);
   if (text === null) return c.json({ error: "見つかりません" }, 404);
-  return c.body(text, 200, { "Content-Type": "application/json" });
+  return c.body(text, 200, {
+    "Content-Type": "application/json",
+    ...(row.upload_version ? { "X-Upload-Version": row.upload_version } : {}),
+  });
 });
 
 // アップロードトークンの再発行。表示は1回だけ(以降サーバー側にはハッシュしか残らない)

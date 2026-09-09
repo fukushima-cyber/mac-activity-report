@@ -87,3 +87,25 @@ it("log and pending reads reject unauthenticated callers", async () => {
   expect((await request("/api/logs/test/2026-09-08", undefined, "invalid")).status).toBe(401);
   expect((await request("/api/logs/pending?from=2026-09-01&to=2026-09-09", undefined, "invalid")).status).toBe(401);
 });
+
+it("another organization's valid token cannot read this employee's logs", async () => {
+  await upload();
+  sqlite.exec("INSERT INTO organizations (id, name) VALUES ('other-org', 'Other'); INSERT INTO secrets (org_id, key, value) VALUES ('other-org', 'ingest_token', 'other-key')");
+  expect((await request("/api/logs/test/2026-09-08", undefined, "other-key")).status).toBe(404);
+  const otherPending = await request("/api/logs/pending?from=2026-09-01&to=2026-09-09", undefined, "other-key");
+  expect(otherPending.status).toBe(200);
+  expect(await otherPending.json()).toEqual([]);
+});
+
+it("an upload-only token cannot publish reports", async () => {
+  expect((await request("/api/reports/ingest", { employee_slug: "test", date: "2026-09-08" }, "upload-test")).status).toBe(401);
+  expect(sqlite.prepare("SELECT COUNT(*) AS n FROM reports").get()?.n).toBe(0);
+});
+
+it("monitoring disabled rejects storage even for a valid employee token", async () => {
+  sqlite.exec("UPDATE employees SET monitoring_enabled = 0");
+  const response = await request("/api/logs/upload", { employee: "test", date: "2026-09-08", windows: [], active_seconds: 0, window_count: 0 }, "upload-test");
+  expect(await response.json()).toMatchObject({ skipped: true });
+  expect(objects.size).toBe(0);
+  expect(await pending()).toEqual([]);
+});

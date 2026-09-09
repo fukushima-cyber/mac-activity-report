@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./App.css";
+import { LogMonitorSection } from "./LogMonitorSection";
 
 type Manager = {
   id: string;
@@ -1035,7 +1036,7 @@ function EmployeeDashboard({
           <h1>{TABS.find((t) => t.key === tab)?.label}</h1>
           <p>{TABS.find((t) => t.key === tab)?.desc}</p>
         </header>
-        {tab === "settings" && <SettingsSection />}
+        {tab === "settings" && <><SettingsSection /><LogMonitorSection /></>}
         {tab === "employees" && <EmployeesSection employees={employees} load={load} orgId={orgId} />}
         {tab === "reports" && <ReportsSection employees={employees} />}
         {tab === "analytics" && <AnalyticsSection employees={employees} />}

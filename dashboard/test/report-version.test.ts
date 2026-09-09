@@ -3,6 +3,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import worker from "../src/server/worker";
 import { hashToken } from "../src/server/logs";
+import { defaultMonitorConfig, runLogMonitor, monitorSnapshot } from "../src/server/log-monitor";
 
 let sqlite: DatabaseSync;
 let env: Parameters<typeof worker.fetch>[1];
@@ -108,4 +109,63 @@ it("monitoring disabled rejects storage even for a valid employee token", async 
   expect(await response.json()).toMatchObject({ skipped: true });
   expect(objects.size).toBe(0);
   expect(await pending()).toEqual([]);
+});
+
+const monitorNow = new Date("2026-09-10T03:00:00Z");
+function setupMonitor() {
+  sqlite.prepare("INSERT INTO log_monitor (org_id, config_json, webhook_url, enabled_at) VALUES (?, ?, ?, ?)")
+    .run(org, JSON.stringify({ ...defaultMonitorConfig, enabled: true }), "https://hooks.slack.com/services/T/B/synthetic", "2026-09-01T00:00:00Z");
+  sqlite.exec("UPDATE employees SET added_at='2026-09-01 00:00:00'");
+}
+it("heartbeat identity comes from employee token and cannot be used for manager operations", async () => {
+  expect((await request("/api/logs/heartbeat", { collection_ok: true, employee_slug: "someone-else" }, "upload-test")).status).toBe(200);
+  expect(sqlite.prepare("SELECT employee_slug FROM employee_log_health").get()?.employee_slug).toBe("test");
+  expect((await request("/api/logs/heartbeat", { collection_ok: true }, "ingest-test")).status).toBe(401);
+  expect((await request("/api/log-monitor/check", {}, "upload-test")).status).toBe(401);
+  sqlite.exec("UPDATE employees SET monitoring_enabled=0; DELETE FROM employee_log_health");
+  expect(await (await request("/api/logs/heartbeat", { collection_ok: true }, "upload-test")).json()).toMatchObject({ skipped: true });
+  expect(sqlite.prepare("SELECT COUNT(*) AS n FROM employee_log_health").get()?.n).toBe(0);
+});
+it("monitor sends once per changed state and sends one recovery notice", async () => {
+  setupMonitor(); const sent: string[] = [];
+  const send: typeof fetch = async (_url, init) => { sent.push(String(init?.body)); return new Response("ok"); };
+  await runLogMonitor(env!.DB, org, monitorNow, send);
+  await runLogMonitor(env!.DB, org, monitorNow, send);
+  expect(sent).toHaveLength(1); expect(sent[0]).toContain("本日のログ未着");
+  sqlite.prepare("INSERT INTO uploads (org_id, employee_slug, date, storage_key, size, uploaded_at) VALUES (?, 'test', '2026-09-10', 'test-key', 1, '2026-09-10 02:50:00')").run(org);
+  await runLogMonitor(env!.DB, org, monitorNow, send);
+  await runLogMonitor(env!.DB, org, monitorNow, send);
+  expect(sent).toHaveLength(2); expect(sent[1]).toContain("解消");
+});
+it("failed notification retries and concurrent checks are leased", async () => {
+  setupMonitor(); let calls = 0;
+  await expect(runLogMonitor(env!.DB, org, monitorNow, async () => new Response("error", { status: 503 }))).rejects.toThrow();
+  expect(sqlite.prepare("SELECT notified_signature FROM log_monitor").get()?.notified_signature).toBe("");
+  const send: typeof fetch = async () => {
+    calls++;
+    expect((await runLogMonitor(env!.DB, org, monitorNow, async () => { throw new Error("must not send"); })).status).toBe("busy_or_unconfigured");
+    return new Response("ok");
+  };
+  await runLogMonitor(env!.DB, org, monitorNow, send); expect(calls).toBe(1);
+  expect(sqlite.prepare("SELECT last_error FROM log_monitor").get()?.last_error).toBeNull();
+});
+it("monitor reads are organization-scoped and old uploads do not count as today's logs", async () => {
+  setupMonitor(); await upload();
+  expect((await monitorSnapshot(env!.DB, org, monitorNow)).issues).toHaveLength(1);
+  expect((await monitorSnapshot(env!.DB, "other-org", monitorNow)).employees).toEqual([]);
+  const response = await request("/api/settings?org=" + org);
+  expect(JSON.stringify(await response.json())).not.toContain("synthetic");
+});
+it("manager settings preserve the webhook on ordinary edits and never return its value", async () => {
+  sqlite.prepare("INSERT INTO managers (id, org_id, email, password_hash) VALUES ('monitor-admin', ?, 'synthetic@example.test', 'not-used')").run(org);
+  sqlite.exec("INSERT INTO sessions (id, manager_id, expires_at) VALUES ('monitor-session', 'monitor-admin', '2099-01-01T00:00:00Z')");
+  const admin = (method: string, body?: unknown) => worker.fetch(new Request("https://example.test/api/log-monitor", { method, headers: { Cookie: "mad_session=monitor-session", "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) }), env);
+  const config = { ...defaultMonitorConfig, enabled: true };
+  expect((await admin("PUT", { config, webhook: "https://hooks.slack.com/services/T/B/private-value" })).status).toBe(200);
+  expect((await admin("PUT", { config: { ...config, graceMinutes: 180 } })).status).toBe(200);
+  const data = await (await admin("GET")).json() as { webhookConfigured: boolean };
+  expect(data.webhookConfigured).toBe(true); expect(JSON.stringify(data)).not.toContain("private-value");
+  expect(sqlite.prepare("SELECT webhook_url FROM log_monitor").get()?.webhook_url).toContain("private-value");
+  expect((await admin("PUT", { config, webhook: "https://example.test/private" })).status).toBe(400);
+  expect((await request("/api/log-monitor")).status).toBe(401);
 });

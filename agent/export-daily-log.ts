@@ -466,8 +466,18 @@ async function main() {
 // 直接実行された時だけmain()を走らせる(importされた時は走らせない。
 // shouldRetryUploadStatus等の純粋関数だけをテストから安全にimportできるようにするため)
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((err) => {
+  main().then(() => sendHeartbeat(!process.exitCode)).catch(async (err) => {
     console.error("エラー:", err.message);
-    process.exit(1);
+    await sendHeartbeat(false);
+    process.exitCode = 1;
   });
+}
+
+export async function sendHeartbeat(ok: boolean, baseUrl = DASHBOARD_URL, token = UPLOAD_TOKEN, fetchImpl: typeof fetch = fetch) {
+  if (!token) return;
+  try {
+    const response = await fetchImpl(`${baseUrl}/api/logs/heartbeat`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ collection_ok: ok }) });
+    if (!response.ok) console.error(`動作確認信号の送信失敗: HTTP ${response.status}`);
+  } catch { console.error("動作確認信号を送信できませんでした。次回再試行します。"); }
 }

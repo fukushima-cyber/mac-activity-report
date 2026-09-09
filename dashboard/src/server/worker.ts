@@ -10,6 +10,7 @@ import {
 } from "./auth";
 import { generateUploadToken, hashToken, retentionCutoffDate, storageKey, validateDailyLog, MAX_LOG_BYTES } from "./logs";
 import { R2LogStorage } from "./storage";
+import { monitorSnapshot, runLogMonitor, validateMonitorConfig, validateSlackWebhook } from "./log-monitor";
 
 type Bindings = { DB: D1Database; LOGS: R2Bucket };
 type Variables = { managerId: string; orgId: string };
@@ -127,6 +128,8 @@ app.use("/api/*", async (c, next) => {
 
   // 直接アップロード方式(docs/decisions/0003): 社員トークン/INGEST_API_KEYで自前認証する経路
   const isEmployeeLogUpload = c.req.path === "/api/logs/upload" && c.req.method === "POST";
+  const isLogHeartbeat = c.req.path === "/api/logs/heartbeat" && c.req.method === "POST";
+  const isMonitorCheck = c.req.path === "/api/log-monitor/check" && c.req.method === "POST";
   const isBearerLogsGet = /^\/api\/logs(\/|$)/.test(c.req.path) && c.req.method === "GET";
   const isBearerUploadTokenRotate =
     /^\/api\/employees\/by-slug\/[^/]+\/upload-token\/rotate$/.test(c.req.path) && c.req.method === "POST";
@@ -137,6 +140,8 @@ app.use("/api/*", async (c, next) => {
     isPublicBySlug ||
     isBearerNotionTokenGet ||
     isEmployeeLogUpload ||
+    isLogHeartbeat ||
+    isMonitorCheck ||
     isBearerLogsGet ||
     isBearerUploadTokenRotate ||
     isBearerRetention
@@ -389,6 +394,48 @@ app.get("/api/activity/by-employee", async (c) => {
 });
 
 // --- 直接アップロード方式(docs/decisions/0003): 社員PCから日次ログを直接受け取る ---
+
+app.get("/api/log-monitor", async (c) => {
+  const snapshot = await monitorSnapshot(c.env.DB, c.get("orgId"));
+  return c.json({ config: snapshot.config, employees: snapshot.employees, webhookConfigured: Boolean(snapshot.stored?.webhook_url),
+    lastCheckedAt: snapshot.stored?.last_checked_at ?? null, lastNotifiedAt: snapshot.stored?.last_notified_at ?? null, lastError: snapshot.stored?.last_error ?? null });
+});
+app.put("/api/log-monitor", async (c) => {
+  let config, webhook: string | undefined;
+  try {
+    const body = await c.req.json<{ config: unknown; webhook?: string }>();
+    config = validateMonitorConfig(body.config);
+    if (body.webhook !== undefined) webhook = body.webhook === "" ? "" : validateSlackWebhook(body.webhook);
+  } catch { return c.json({ error: "通知設定またはSlack Webhookの形式を確認してください。" }, 400); }
+  const previous = await monitorSnapshot(c.env.DB, c.get("orgId"));
+  const enabledAt = !previous.config.enabled && config.enabled ? new Date().toISOString() : previous.stored?.enabled_at ?? new Date().toISOString();
+  await c.env.DB.prepare(`INSERT INTO log_monitor (org_id, config_json, webhook_url, enabled_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(org_id) DO UPDATE SET config_json=excluded.config_json,
+    notified_signature=CASE WHEN COALESCE(log_monitor.webhook_url,'') != COALESCE(excluded.webhook_url,'') THEN '' ELSE log_monitor.notified_signature END,
+    webhook_url=excluded.webhook_url, enabled_at=excluded.enabled_at`)
+    .bind(c.get("orgId"), JSON.stringify(config), webhook === undefined ? previous.stored?.webhook_url ?? null : webhook || null, enabledAt).run();
+  return c.json({ ok: true });
+});
+app.post("/api/log-monitor/check", async (c) => {
+  const orgId = await resolveIngestOrg(c) ?? (await resolveSession(c, getCookie(c, SESSION_COOKIE)))?.org_id;
+  if (!orgId) return c.json({ error: "認証に失敗しました" }, 401);
+  return c.json(await runLogMonitor(c.env.DB, orgId));
+});
+app.post("/api/logs/heartbeat", async (c) => {
+  const token = c.req.header("Authorization")?.replace(/^Bearer /, "");
+  if (!token) return c.json({ error: "認証に失敗しました" }, 401);
+  const employee = await c.env.DB.prepare("SELECT org_id, slug, monitoring_enabled FROM employees WHERE upload_token_hash=?")
+    .bind(await hashToken(token)).first<{ org_id: string; slug: string; monitoring_enabled: number }>();
+  if (!employee) return c.json({ error: "認証に失敗しました" }, 401);
+  if (!employee.monitoring_enabled) return c.json({ skipped: true });
+  let body;
+  try { body = await c.req.json<{ collection_ok: boolean }>(); } catch { return c.json({ error: "形式が不正です" }, 400); }
+  if (typeof body.collection_ok !== "boolean") return c.json({ error: "形式が不正です" }, 400);
+  await c.env.DB.prepare(`INSERT INTO employee_log_health (org_id, employee_slug, heartbeat_at, collection_ok) VALUES (?, ?, ?, ?)
+    ON CONFLICT(org_id, employee_slug) DO UPDATE SET heartbeat_at=excluded.heartbeat_at, collection_ok=excluded.collection_ok`)
+    .bind(employee.org_id, employee.slug, new Date().toISOString(), body.collection_ok ? 1 : 0).run();
+  return c.json({ ok: true });
+});
 
 // 社員PCの書き出しスクリプトが、社員専用・アップロード専用トークンで送ってくる。
 // トークンはハッシュでしか照合しない(生の値はDBに残らない)。

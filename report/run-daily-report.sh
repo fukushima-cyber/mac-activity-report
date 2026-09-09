@@ -153,6 +153,10 @@ fi
 
 echo ""
 echo "=== 保管期間を過ぎた生ログの削除(ダッシュボード側) ==="
-node "$SCRIPT_DIR/retention.mjs" || echo "警告: 生ログの削除処理に失敗しました(レポート自体は完了しています)" >&2
+if [ "${REPORT_RETENTION_ENABLED:-1}" = "1" ]; then
+  node "$SCRIPT_DIR/retention.mjs" || echo "警告: 生ログの削除処理に失敗しました(レポート自体は完了しています)" >&2
+else
+  echo "この実行元からの生ログ削除は無効です"
+fi
 
 exit "$OVERALL"

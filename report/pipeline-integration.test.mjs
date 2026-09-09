@@ -17,7 +17,7 @@ async function fixture(t) {
   await fs.mkdir(path.join(root, "bin"));
   await fs.copyFile(path.join(reportDir, "test-fixtures/claude.mjs"), path.join(root, "bin/claude"));
   await fs.chmod(path.join(root, "bin/claude"), 0o755);
-  const state = { fail: "", calls: [], source: "version-1", completed: null };
+  const state = { fail: "", calls: [], source: "version-1", completed: null, llmCalls: 0, localTokenSeen: false };
   const server = createServer(async (req, res) => {
     try {
       const chunks = [];
@@ -25,7 +25,16 @@ async function fixture(t) {
       const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
       const url = new URL(req.url, "http://test");
       const route = url.pathname;
+      if (req.headers.authorization === "Bearer local-notion") state.localTokenSeen = true;
       const reply = (data, status = 200, headers = {}) => { res.writeHead(status, { "Content-Type": "application/json", ...headers }); res.end(JSON.stringify(data)); };
+      if (route === "/v1/chat/completions" || route === "/v1/messages") {
+        state.llmCalls++;
+        assert.equal(body.model, "fixture-model");
+        assert.ok(body.messages[0].content.includes('"employee":"fixture"'));
+        assert.equal(body.tools, undefined);
+        const text = JSON.stringify([{ employee_slug: "fixture", employee_name: "Fixture", active_hours: 1, window_count: 1, summary: "Test", waste_notes: "None", automation_notes: "None", timeline: [] }]);
+        return reply(route.endsWith("/messages") ? { content: [{ type: "text", text }] } : { choices: [{ message: { content: text } }] });
+      }
       if (route === "/api/settings") return reply({});
       if (route === "/api/logs/pending") return reply(state.completed === state.source ? [] : [{ employee_slug: "fixture", date }]);
       if (route === "/api/logs") return reply([{ employee_slug: "fixture", date }]);
@@ -78,7 +87,7 @@ async function fixture(t) {
       child.on("close", (code) => { clearTimeout(timer); resolve({ code, output }); });
     });
   }
-  return { state, run, root };
+  return { state, run, root, url };
 }
 
 test("real shell pipeline saves in order, forwards the version and does no work on rerun", async (t) => {
@@ -113,3 +122,12 @@ test("invalid analysis configuration cannot reach publication", async (t) => {
   assert.notEqual(result.code, 0);
   assert.deepEqual(state.calls, []);
 });
+for (const provider of ["openai-compatible", "anthropic"]) {
+  test(`full pipeline supports ${provider} and company-local Notion credentials`, async (t) => {
+    const { state, run, url } = await fixture(t);
+    const result = await run({ REPORT_LLM_PROVIDER: provider, REPORT_LLM_BASE_URL: `${url}/v1`, REPORT_LLM_MODEL: "fixture-model", REPORT_LLM_API_KEY: "fixture-key", NOTION_TOKEN: "local-notion", NOTION_REPORT_DB_URL: "11111111111111111111111111111111", REPORT_DASHBOARD_ONLY: "1" });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(state.llmCalls, 1); assert.equal(state.localTokenSeen, true);
+    assert.equal(state.completed, "version-1");
+  });
+}

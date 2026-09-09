@@ -8,13 +8,13 @@
 //
 // 旧方式(フォールバック/移行期間の後方互換): 組織共通デフォルトのログフォルダ(SHARED_DRIVE_PATH)
 // と、その親フォルダに並ぶ他のサブフォルダ(社員ごとに個別共有された格納先。例:
-// 「ログ/テストログ」「ログ/ひえいログ」)を両方スキャンし、対象日のログJSONをシンボリックリンクで
+// 「ログ/社員A」「ログ/社員B」)を両方スキャンし、対象日のログJSONをシンボリックリンクで
 // 集約する。ダッシュボード側から既に取得済みの社員は、同名ファイルの重複としてスキップする
 // (通常の重複警告ではなく「ダッシュボード取得分を優先」と表示する)。
 //
 // 社員ごとの個別格納先パスは、その社員自身のMac上でのローカルパス(agent/.env)であり、
-// 福島さんのMac上には存在しない別のパスになる(Googleドライブのショートカット先IDがマシンごとに
-// 異なるため)。そのため福島さんのMac側からは、DBの値をそのまま辿るのではなく、福島さんの
+// 管理者のMac上には存在しない別のパスになる(Googleドライブのショートカット先IDがマシンごとに
+// 異なるため)。そのため管理者のMac側からは、DBの値をそのまま辿るのではなく、管理者の
 // Googleドライブ内で実際に見えている場所を直接スキャンする。
 //
 // 兄弟フォルダのスキャンは、設定済みの共有ドライブのパスが渡された時だけ行う(第3引数/環境変数で有効化)。
@@ -73,6 +73,10 @@ if (ingestApiKey) {
     for (const fileName of result.written) dashboardFileNames.add(fileName);
     console.error(`ダッシュボードから ${result.written.length} 人分を取得`);
   } else {
+    if (process.env.REPORT_DASHBOARD_ONLY === "1") {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      throw new Error("Dashboard log collection failed; local fallback is disabled");
+    }
     console.error(`警告: ダッシュボードからの取得に失敗しました(${result.error})。Driveからの取得にフォールバックします`);
   }
 }
@@ -112,9 +116,9 @@ async function collectFrom(dir) {
   }
 }
 
-await collectFrom(defaultSharedDrivePath);
+if (process.env.REPORT_DASHBOARD_ONLY !== "1") await collectFrom(defaultSharedDrivePath);
 
-if (scanSiblings) {
+if (scanSiblings && process.env.REPORT_DASHBOARD_ONLY !== "1") {
   const parentDir = path.dirname(defaultSharedDrivePath);
   // Google Driveのマウントは readdir の結果をNFD(分解形)で返す一方、設定値はNFC(合成形)で
   // 書かれていることが多い。同じフォルダを「別物」と誤判定して二重スキャンしないよう、NFCに揃えて比較する

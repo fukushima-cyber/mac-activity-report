@@ -79,6 +79,10 @@ async function main() {
     // 登録された正式名も一緒に取得する。表示名はAIの推測に任せず、これで上書きする(未登録なら元の値のまま)
     notionConfig: async (slug) => {
       const config = await fetchNotionToken(slug);
+      if (process.env.NOTION_TOKEN) {
+        if (!NOTION_REPORT_DB_URL) throw new Error("NOTION_REPORT_DB_URL is required with a local NOTION_TOKEN");
+        return { token: process.env.NOTION_TOKEN, reportDbUrl: NOTION_REPORT_DB_URL, name: config.name };
+      }
       return { ...config, reportDbUrl: config.reportDbUrl ?? NOTION_REPORT_DB_URL };
     },
 

@@ -11,6 +11,9 @@
     "preview": "vite preview",
     "test": "vitest run"
   },
+  "overrides": {
+    "sharp": "0.35.4"
+  },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.54.1",
     "better-auth": "^1.7.2",

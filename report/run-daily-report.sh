@@ -4,7 +4,7 @@
 # Notionへの書き込み自体はAI不使用・決定的処理(publish-report.mjs)。
 #
 # 使い方:
-#   run-daily-report.sh              … 「アップロードがレポートより新しい社員・日」だけを過去3日分から作り直す(cron用。docs/decisions/0004)
+#   run-daily-report.sh              … 未処理の版がある社員・日を過去90日分から作り直す(cron用)
 #   run-daily-report.sh YYYY-MM-DD   … その日を全員分で作り直す(手動用)
 #
 # 社員PCは起動中30分おきに過去数日分を送り直すので、朝の1回きりでは「遅れて届いた分」を取りこぼす。
@@ -30,12 +30,12 @@ yesterday_jst() {
   fi
 }
 
-export DASHBOARD_URL="https://log.bonkers.llc"
+export DASHBOARD_URL="${DASHBOARD_URL:-https://log.bonkers.llc}"
 if [ -z "${ORG_ID:-}" ]; then
   echo "ORG_ID が report/.env に設定されていません。ダッシュボードにログインして「設定」を保存すると分かります。" >&2
   exit 1
 fi
-DASHBOARD_SETTINGS="$(curl -fsS "$DASHBOARD_URL/api/settings?org=$ORG_ID" 2>/dev/null || echo '{}')"
+DASHBOARD_SETTINGS="$(curl -fsS --max-time 30 "$DASHBOARD_URL/api/settings?org=$ORG_ID" 2>/dev/null || echo '{}')"
 setting() {
   echo "$DASHBOARD_SETTINGS" | node -e "
     let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{
@@ -96,8 +96,16 @@ run_for_date() {
   # analyze-parallel.mjsは一部/全員分の失敗を終了コード(1=全滅, 2=一部失敗)で伝える
   local ANALYZE_STATUS=0
   node "$SCRIPT_DIR/analyze-parallel.mjs" "$DATE" "$SHARED_DRIVE_PATH" "$SCRIPT_DIR/daily-report-prompt.md" "$ANALYSIS_FILE" || ANALYZE_STATUS=$?
-  if [ "$ANALYZE_STATUS" -eq 1 ]; then
+  if [ "$ANALYZE_STATUS" -ne 0 ] && [ "$ANALYZE_STATUS" -ne 2 ]; then
     echo "分析が全員分失敗したため、この日は中断します(${DATE})" >&2
+    cleanup_current
+    return 1
+  fi
+
+  echo ""
+  echo "=== 集計データを先に送信 ==="
+  if ! node "$SCRIPT_DIR/ingest-activity.mjs" "$DATE"; then
+    echo "集計送信に失敗したため、レポートは未完了のまま残します(${DATE})" >&2
     cleanup_current
     return 1
   fi
@@ -109,10 +117,6 @@ run_for_date() {
     cleanup_current
     return 1
   fi
-
-  echo ""
-  echo "=== 集計データ(アプリ別の稼働時間)をダッシュボードへ送信 ==="
-  node "$SCRIPT_DIR/ingest-activity.mjs" "$DATE" || echo "警告: 集計データの送信に失敗しました(${DATE})" >&2
 
   cleanup_current
   if [ "$ANALYZE_STATUS" -eq 2 ]; then
@@ -132,7 +136,7 @@ if [ -n "${1:-}" ]; then
   run_for_date "$1" </dev/null || note_status $?
 else
   PENDING=""
-  if PENDING="$(node "$SCRIPT_DIR/pending-reports.mjs" 3)"; then
+  if PENDING="$(node "$SCRIPT_DIR/pending-reports.mjs" "${REPORT_LOOKBACK_DAYS:-90}")"; then
     if [ -z "$PENDING" ]; then
       echo "作り直しが必要な社員・日はありません(前回以降、新しいアップロードなし)"
     else
@@ -149,6 +153,10 @@ fi
 
 echo ""
 echo "=== 保管期間を過ぎた生ログの削除(ダッシュボード側) ==="
-node "$SCRIPT_DIR/retention.mjs" || echo "警告: 生ログの削除処理に失敗しました(レポート自体は完了しています)" >&2
+if [ "${REPORT_RETENTION_ENABLED:-1}" = "1" ]; then
+  node "$SCRIPT_DIR/retention.mjs" || echo "警告: 生ログの削除処理に失敗しました(レポート自体は完了しています)" >&2
+else
+  echo "この実行元からの生ログ削除は無効です"
+fi
 
 exit "$OVERALL"

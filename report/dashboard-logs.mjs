@@ -15,7 +15,7 @@ export async function fetchDailyLogsFromDashboard({ baseUrl, apiKey, date, destD
 
   let listRes;
   try {
-    listRes = await fetchImpl(`${baseUrl}/api/logs?date=${encodeURIComponent(date)}`, { headers });
+    listRes = await fetchImpl(`${baseUrl}/api/logs?date=${encodeURIComponent(date)}`, { headers, signal: AbortSignal.timeout(30_000) });
   } catch (err) {
     return { ok: false, error: `一覧取得でネットワークエラー: ${err.message}` };
   }
@@ -34,12 +34,13 @@ export async function fetchDailyLogsFromDashboard({ baseUrl, apiKey, date, destD
   }
 
   const written = [];
+  const versions = Object.create(null);
   for (const row of rows) {
     const slug = row.employee_slug;
     let logRes;
     try {
       logRes = await fetchImpl(`${baseUrl}/api/logs/${encodeURIComponent(slug)}/${encodeURIComponent(date)}`, {
-        headers,
+        headers, signal: AbortSignal.timeout(30_000),
       });
     } catch (err) {
       console.error(`警告: ${slug}のログ取得でネットワークエラー(スキップ): ${err.message}`);
@@ -55,7 +56,10 @@ export async function fetchDailyLogsFromDashboard({ baseUrl, apiKey, date, destD
     const destPath = path.join(destDir, fileName);
     await fs.writeFile(destPath, text, "utf-8"); // シンボリックリンクではなく実ファイルとして書く(取得元がリモートのため)
     written.push(fileName);
+    versions[slug] = logRes.headers.get("X-Upload-Version");
   }
+
+  await fs.writeFile(path.join(destDir, ".source-versions.json"), JSON.stringify(versions));
 
   return { ok: true, written };
 }

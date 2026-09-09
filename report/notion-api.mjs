@@ -28,6 +28,7 @@ function rt(text) {
 
 async function notionFetch(token, path, options = {}) {
   const res = await fetch(`https://api.notion.com/v1${path}`, {
+    signal: AbortSignal.timeout(30_000),
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -182,6 +183,35 @@ export async function ensureSchema(token, databaseId) {
 // 互換用エイリアス(旧名での呼び出しに対応)
 export const ensureKeyProperty = ensureSchema;
 
+export async function replacePageBody(token, pageId, children) {
+  const previous = [];
+  let cursor;
+  do {
+    const query = new URLSearchParams({ page_size: "100" });
+    if (cursor) query.set("start_cursor", cursor);
+    const page = await notionFetch(token, `/blocks/${pageId}/children?${query}`);
+    previous.push(...page.results);
+    if (page.has_more && !page.next_cursor) throw new Error("Missing Notion pagination cursor");
+    cursor = page.has_more ? page.next_cursor : null;
+  } while (cursor);
+
+  // Keep the old body intact until every new block has been accepted.
+  // An uncertain write is not blindly retried: the next job reconciles the page.
+  await appendPageBody(token, pageId, children);
+  for (const block of previous) {
+    await notionFetch(token, `/blocks/${block.id}`, { method: "DELETE" });
+  }
+}
+
+async function appendPageBody(token, pageId, children) {
+  for (let offset = 0; offset < children.length; offset += 100) {
+    await notionFetch(token, `/blocks/${pageId}/children`, {
+      method: "PATCH",
+      body: JSON.stringify({ children: children.slice(offset, offset + 100) }),
+    });
+  }
+}
+
 export async function upsertReportPage(token, databaseId, { keyValue, titleValue, properties, children }) {
   if (!keyValue) {
     throw new Error("keyValue は必須です");
@@ -208,21 +238,14 @@ export async function upsertReportPage(token, databaseId, { keyValue, titleValue
   };
   if (existingId) {
     await notionFetch(token, `/pages/${existingId}`, { method: "PATCH", body: JSON.stringify({ properties: body.properties }) });
-    // 本文は一旦既存ブロックを取得して削除し、作り直す(シンプルさ優先)
-    const existingBlocks = await notionFetch(token, `/blocks/${existingId}/children?page_size=100`);
-    for (const block of existingBlocks.results) {
-      await notionFetch(token, `/blocks/${block.id}`, { method: "DELETE" }).catch(() => {});
-    }
-    await notionFetch(token, `/blocks/${existingId}/children`, {
-      method: "PATCH",
-      body: JSON.stringify({ children }),
-    });
+    await replacePageBody(token, existingId, children);
     return existingId;
   }
   const created = await notionFetch(token, "/pages", {
     method: "POST",
-    body: JSON.stringify({ parent: { database_id: toDashedId(databaseId) }, ...body, children }),
+    body: JSON.stringify({ parent: { database_id: toDashedId(databaseId) }, ...body, children: children.slice(0, 100) }),
   });
+  await appendPageBody(token, created.id, children.slice(100));
   return created.id;
 }
 
@@ -277,7 +300,16 @@ export function timelineToBlocks(timeline, summaryText, appTotals) {
     });
   }
 
-  return blocks;
+  // Tables also have a children-array limit. Repeat the header on each part.
+  return blocks.flatMap((block) => {
+    if (block.type !== "table" || block.table.children.length <= 100) return [block];
+    const [header, ...rows] = block.table.children;
+    const tables = [];
+    for (let offset = 0; offset < rows.length; offset += 99) {
+      tables.push({ ...block, table: { ...block.table, children: [header, ...rows.slice(offset, offset + 99)] } });
+    }
+    return tables;
+  });
 }
 
 export async function createDatabase(token, parentPageId, title, properties) {
@@ -291,4 +323,3 @@ export async function createDatabase(token, parentPageId, title, properties) {
   });
   return created;
 }
-

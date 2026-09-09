@@ -115,7 +115,7 @@ export function snapshotHash(report: Snapshot): string {
 
 async function activityWatchReachable(): Promise<boolean> {
   try {
-    const res = await fetch(`${AW_HOST}/api/0/buckets/`);
+    const res = await fetch(`${AW_HOST}/api/0/buckets/`, { signal: AbortSignal.timeout(10_000) });
     return res.ok;
   } catch {
     return false;
@@ -160,7 +160,7 @@ async function ensureActivityWatch(): Promise<void> {
 async function fetchBucketId(prefix: string): Promise<string> {
   let res: Response;
   try {
-    res = await fetch(`${AW_HOST}/api/0/buckets/`);
+    res = await fetch(`${AW_HOST}/api/0/buckets/`, { signal: AbortSignal.timeout(10_000) });
   } catch (err) {
     // ActivityWatchが起動していない/初回のアクセシビリティ許可待ちで応答が無い場合はここに来る
     throw new Error(
@@ -176,7 +176,7 @@ async function fetchBucketId(prefix: string): Promise<string> {
 
 async function fetchEvents(bucketId: string, start: string, end: string): Promise<AwEvent[]> {
   const url = `${AW_HOST}/api/0/buckets/${bucketId}/events?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&limit=-1`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`イベント取得に失敗しました: ${res.status}`);
   return (await res.json()) as AwEvent[];
 }
@@ -205,7 +205,7 @@ function activeSeconds(afkEvents: AwEvent[]): number {
 async function monitoringEnabled(): Promise<boolean> {
   if (!ORG_ID) return true; // 組織IDが無ければ従来通り動かす(後方互換)
   try {
-    const res = await fetch(`${DASHBOARD_URL}/api/employees/by-slug/${ORG_ID}/${EMPLOYEE_NAME}/public`);
+    const res = await fetch(`${DASHBOARD_URL}/api/employees/by-slug/${encodeURIComponent(ORG_ID)}/${encodeURIComponent(EMPLOYEE_NAME)}/public`, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return true;
     const json = (await res.json()) as { monitoring_enabled?: boolean };
     return json.monitoring_enabled !== false;
@@ -262,6 +262,7 @@ async function uploadReport(body: string): Promise<UploadResult> {
     let res: Response;
     try {
       res = await fetch(`${DASHBOARD_URL}/api/logs/upload`, {
+        signal: AbortSignal.timeout(30_000),
         method: "POST",
         headers: {
           Authorization: `Bearer ${UPLOAD_TOKEN}`,
@@ -317,10 +318,64 @@ async function uploadReport(body: string): Promise<UploadResult> {
 
     const json = (await res.json()) as { ok?: boolean; date?: string; size?: number; skipped?: boolean };
     if (json.skipped) return { kind: "skipped" };
-    return { kind: "ok", date: json.date ?? "", size: json.size ?? 0 };
+    if (json.ok !== true || typeof json.date !== "string" || typeof json.size !== "number") {
+      console.error("アップロード応答を確認できません。送信済みにはしません。");
+      return { kind: "gave_up" };
+    }
+    return { kind: "ok", date: json.date, size: json.size };
   }
 
   return { kind: "gave_up" };
+}
+
+export async function retrySavedUploads({ outputDir, employee, now, upload }: {
+  outputDir: string;
+  employee: string;
+  now: Date;
+  upload: (body: string) => Promise<UploadResult>;
+}): Promise<number> {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const dates = new Set(recentJstDates(now, 90));
+  const recent = new Set(recentJstDates(now, RECENT_DAYS));
+  let files: string[];
+  try { files = await fs.readdir(outputDir); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+  let failed = 0;
+  let attempted = 0;
+  for (const file of files.sort()) {
+    const date = file.slice(0, 10);
+    if (file !== `${date}_${employee}.json` || !dates.has(date) || recent.has(date)) continue;
+    try {
+      const body = await fs.readFile(path.join(outputDir, file), "utf-8");
+      const report = JSON.parse(body) as Snapshot;
+      if (report.employee !== employee || report.date !== date || !Array.isArray(report.windows)) throw new Error("Saved log identity mismatch");
+      const hash = snapshotHash(report);
+      const hashPath = path.join(outputDir, ".uploaded", `${date}_${employee}.sha256`);
+      const previous = await fs.readFile(hashPath, "utf-8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (previous === hash) continue;
+      if (attempted >= 10) break;
+      attempted++;
+      const result = await upload(body);
+      if (result.kind === "ok" && result.date === date) {
+        await fs.mkdir(path.dirname(hashPath), { recursive: true });
+        await fs.writeFile(hashPath, hash, "utf-8");
+        console.log(`${date}: 保存済みログの再送完了`);
+      } else if (result.kind !== "skipped") {
+        failed++;
+      }
+    } catch (error) {
+      failed++;
+      console.error(`${date}: 保存済みログの再送失敗: ${(error as Error).message}`);
+    }
+  }
+  return failed;
 }
 
 async function main() {
@@ -333,6 +388,11 @@ async function main() {
   // 旧方式(共有フォルダ)は従来どおり1日分(23:50に1回だけ動く前提のため)。
   const explicitDate = process.argv[2];
   const dates = explicitDate ? [explicitDate] : UPLOAD_TOKEN ? recentJstDates(new Date(), RECENT_DAYS) : [defaultExportDate()];
+
+  if (UPLOAD_TOKEN && !explicitDate) {
+    const failed = await retrySavedUploads({ outputDir: OUTPUT_DIR, employee: EMPLOYEE_NAME, now: new Date(), upload: uploadReport });
+    if (failed) process.exitCode = 1;
+  }
 
   await ensureActivityWatch();
   const windowBucket = await fetchBucketId("aw-watcher-window_");
@@ -388,7 +448,7 @@ async function main() {
     }
 
     const result = await uploadReport(JSON.stringify(report));
-    if (result.kind === "ok") {
+    if (result.kind === "ok" && result.date === date) {
       await fs.mkdir(path.dirname(hashPath), { recursive: true });
       await fs.writeFile(hashPath, hash, "utf-8");
       console.log(`${date}: アップロード完了 (${result.size} bytes、${summary})`);
@@ -406,8 +466,18 @@ async function main() {
 // 直接実行された時だけmain()を走らせる(importされた時は走らせない。
 // shouldRetryUploadStatus等の純粋関数だけをテストから安全にimportできるようにするため)
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((err) => {
+  main().then(() => sendHeartbeat(!process.exitCode)).catch(async (err) => {
     console.error("エラー:", err.message);
-    process.exit(1);
+    await sendHeartbeat(false);
+    process.exitCode = 1;
   });
+}
+
+export async function sendHeartbeat(ok: boolean, baseUrl = DASHBOARD_URL, token = UPLOAD_TOKEN, fetchImpl: typeof fetch = fetch) {
+  if (!token) return;
+  try {
+    const response = await fetchImpl(`${baseUrl}/api/logs/heartbeat`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ collection_ok: ok }) });
+    if (!response.ok) console.error(`動作確認信号の送信失敗: HTTP ${response.status}`);
+  } catch { console.error("動作確認信号を送信できませんでした。次回再試行します。"); }
 }

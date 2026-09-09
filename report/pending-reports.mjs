@@ -3,12 +3,13 @@
 // 社員PCは起動中30分おきに過去数日分を送り直すため、朝9時の1回きりでは「遅れて届いた分」を
 // 取りこぼす。run-daily-report.sh が引数無しで呼ばれた時にこれを使い、該当する社員・日だけを処理する。
 //
-// 使い方: node report/pending-reports.mjs [遡る日数=3]
+// 使い方: node report/pending-reports.mjs [遡る日数=90]
 // 標準出力: 1行1日 "YYYY-MM-DD<TAB>slug1,slug2,..." (古い日付順)。今日(JST)は対象外(まだ途中なので)。
 // 該当なしなら何も出さず終了コード0。API失敗は終了コード1(呼び出し側は従来の前日分処理へフォールバックする)。
 const DASHBOARD_URL = process.env.DASHBOARD_URL ?? "https://log.bonkers.llc";
 const INGEST_API_KEY = process.env.INGEST_API_KEY;
-const DAYS = Number(process.argv[2]) || 3;
+const DAYS = Number(process.argv[2] ?? 90);
+if (!Number.isInteger(DAYS) || DAYS < 1 || DAYS > 3650) throw new Error("Invalid lookback days (1..3650)");
 
 function jstDateOffset(daysAgo) {
   const now = new Date();
@@ -24,7 +25,7 @@ async function main() {
   const from = jstDateOffset(DAYS);
   const to = jstDateOffset(1);
   const url = `${DASHBOARD_URL}/api/logs/pending?from=${from}&to=${to}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` } });
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` }, signal: AbortSignal.timeout(30_000) });
   if (!res.ok) {
     console.error(`更新のある社員・日の取得に失敗しました: ${res.status} ${await res.text()}`);
     process.exit(1);
